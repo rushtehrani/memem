@@ -143,6 +143,7 @@ Files             attached to memories, stored whole
 - [x] Revise outdated memories in place, recording which connection changed them
 - [x] Browse a whole space, page by page
 - [x] Tool descriptions state the purpose of memory rather than strict rules
+- [x] Refuse exact duplicates and show similar memories when saving
 - [ ] Keep edit history, so changes can be undone
 - [ ] Track deletions, so forgotten facts can't be recreated
 - [ ] Refuse edits that would overwrite a newer change

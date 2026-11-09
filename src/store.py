@@ -20,6 +20,8 @@ MAX_QUERY_WORDS = 20
 CANDIDATES = 50
 # Measured on bge-base-en-v1.5: relevant queries scored 0.55 or more, unrelated ones 0.50 or less.
 MIN_SIMILARITY = 0.52
+MAX_SIMILAR = 3
+SIMILAR_PREVIEW_CHARS = 500
 RANK_CONSTANT = 60
 # Every chat reads the pinned notes first, so they must stay small.
 MAX_PINNED_CHARS = 4_000
@@ -37,6 +39,12 @@ UNUSED_CLIENT_TTL = 24 * 3600
 
 def _hash(secret: str) -> str:
     return hashlib.sha256(secret.encode()).hexdigest()
+
+
+class AlreadySaved(Exception):
+    def __init__(self, memory_id: int):
+        super().__init__("This exact memory is already saved.")
+        self.memory_id = memory_id
 
 
 class SpaceFull(Exception):
@@ -227,12 +235,17 @@ class Store:
     async def _remove_vector(self, memory_id: int) -> None:
         await self._guarded(lambda: self._semantic.remove(f"{_MEMORY_VECTOR}{memory_id}"))
 
-    async def remember(self, space: str, content: str, source: str) -> int:
-        # One statement, so concurrent writers cannot push a space past its cap.
+    async def remember(self, space: str, content: str, source: str, unique: bool = False) -> int:
+        duplicate, duplicate_params = (
+            (" AND NOT EXISTS (SELECT 1 FROM memories WHERE space = ? AND content = ?)", [space, content])
+            if unique
+            else ("", [])
+        )
+        # One statement, so concurrent writers cannot push a space past its cap or save the same memory twice.
         rows = await self._all(
             "INSERT INTO memories (space, content, source, created_at)"
             " SELECT ?, ?, ?, ?"
-            " WHERE (SELECT COUNT(*) FROM memories WHERE space = ?) < ?"
+            f" WHERE (SELECT COUNT(*) FROM memories WHERE space = ?) < ?{duplicate}"
             " RETURNING id",
             space,
             content,
@@ -240,12 +253,33 @@ class Store:
             datetime.now(UTC).isoformat(),
             space,
             MAX_MEMORIES_PER_SPACE,
+            *duplicate_params,
         )
         if not rows:
+            if unique:
+                existing = await self._all(
+                    "SELECT id FROM memories WHERE space = ? AND content = ? LIMIT 1", space, content
+                )
+                if existing:
+                    raise AlreadySaved(existing[0]["id"])
             raise SpaceFull("This memory space is full. Forget something first.")
         memory_id = rows[0]["id"]
         await self._guarded(lambda: self._add_vector(space, memory_id, content))
         return memory_id
+
+    async def similar(self, space: str, content: str, memory_id: int) -> list[dict]:
+        """Short previews of other memories close in meaning, so a new one can be merged instead of piling up."""
+        ids = [found for found in await self._meaning_matches(space, content) if found != memory_id][:MAX_SIMILAR]
+        rows = {row["id"]: row for row in await self._rows_by_id(space, ids)}
+        return [
+            {
+                "id": found,
+                "content": rows[found]["content"][:SIMILAR_PREVIEW_CHARS],
+                "created_at": rows[found]["created_at"],
+            }
+            for found in ids
+            if found in rows
+        ]
 
     async def update(
         self, space: str, memory_id: int, editor: str, content: str | None, pinned: bool | None
