@@ -1,0 +1,653 @@
+import asyncio
+import base64
+import hashlib
+import html
+import json
+import os
+import re
+import secrets
+import signal
+import socket
+import subprocess
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from threading import Thread
+from urllib.parse import parse_qs, urlencode, urlsplit
+
+import httpx
+import httpx2
+import pytest
+from mcp import Client
+from mcp.client.auth.oauth2 import AuthorizationCodeResult, OAuthClientProvider
+from mcp.client.streamable_http import streamable_http_client
+from mcp.shared.auth import OAuthClientMetadata
+
+GOOGLE_CLIENT_ID = "test-google-id"
+GOOGLE_CLIENT_SECRET = "test-google-secret"
+OWNER_EMAIL = "owner@example.com"
+LOCAL_REDIRECT = "http://127.0.0.1:9999/callback"
+CLAUDE_REDIRECT = "https://claude.ai/api/mcp/auth_callback"
+CHATGPT_REDIRECT = "https://chatgpt.com/connector_platform_oauth_redirect"
+TOOLS_LIST = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+ACCEPT = {"accept": "application/json, text/event-stream"}
+WRANGLER_ENV = {**os.environ, "CI": "1", "WRANGLER_SEND_METRICS": "false"}
+
+
+def memem(persist, *args):
+    return subprocess.run(
+        ["uv", "run", "memem", "--local", "--persist-to", str(persist), *args],
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+    )
+
+
+def d1(persist, sql):
+    command = ["npx", "--yes", "wrangler", "d1", "execute", "memem", "--local", "--persist-to", str(persist)]
+    subprocess.run([*command, "--command", sql], check=True, capture_output=True, env=WRANGLER_ENV, stdin=subprocess.DEVNULL)
+
+
+def register(base, redirect=LOCAL_REDIRECT):
+    return httpx.post(f"{base}/oauth/register", json={"redirect_uris": [redirect], "client_name": "test"})
+
+
+def pkce():
+    verifier = secrets.token_urlsafe(48)
+    digest = hashlib.sha256(verifier.encode()).digest()
+    return verifier, base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+
+
+def claims(nonce, **overrides):
+    return {
+        "iss": "https://accounts.google.com", "aud": GOOGLE_CLIENT_ID, "exp": int(time.time()) + 300,
+        "nonce": nonce, "email": OWNER_EMAIL, "email_verified": True, **overrides,
+    }
+
+
+def fake_code(value):
+    return base64.urlsafe_b64encode(json.dumps(value).encode()).decode()
+
+
+def open_consent(authorize_url):
+    page = httpx.get(authorize_url)
+    if page.status_code != 200:
+        return page, None, {}
+    session = re.search(r"memem_session=([^;]+)", page.headers["set-cookie"]).group(1)
+    fields = {k: html.unescape(v) for k, v in re.findall(r'type=hidden name="([^"]+)" value="([^"]*)"', page.text)}
+    return page, session, fields
+
+
+def to_google(base, session, fields, space="work", read_only=False):
+    form = {**fields, "space": space, **({"read_only": "on"} if read_only else {})}
+    return httpx.post(f"{base}/oauth/authorize", data=form, headers={"cookie": f"memem_session={session}"})
+
+
+def callback(base, query, session):
+    headers = {"cookie": f"memem_session={session}"} if session else {}
+    return httpx.get(f"{base}/oauth/google/callback", params=query, headers=headers)
+
+
+def sign_in(base, authorize_url, space="work", read_only=False, session_override=None, **claim_overrides):
+    page, session, fields = open_consent(authorize_url)
+    if session is None:
+        return page
+    response = to_google(base, session, fields, space, read_only)
+    assert response.status_code == 302, response.text
+    google = {k: v[0] for k, v in parse_qs(urlsplit(response.headers["location"]).query).items()}
+    code = fake_code({**claims(google["nonce"]), **claim_overrides})
+    return callback(base, {"state": google["state"], "code": code}, session_override or session)
+
+
+def authorize_url(base, client_id, challenge, redirect=LOCAL_REDIRECT):
+    return f"{base}/oauth/authorize?" + urlencode({
+        "client_id": client_id, "redirect_uri": redirect, "response_type": "code", "code_challenge": challenge,
+        "code_challenge_method": "S256", "resource": f"{base}/mcp", "state": "xyz",
+    })
+
+
+def approve(base, client_id, challenge, redirect=LOCAL_REDIRECT, **kwargs):
+    return sign_in(base, authorize_url(base, client_id, challenge, redirect), **kwargs)
+
+
+def code_from(response):
+    return parse_qs(urlsplit(response.headers["location"]).query)["code"][0]
+
+
+def exchange(base, client_id, code, verifier, redirect=LOCAL_REDIRECT):
+    return httpx.post(
+        f"{base}/oauth/token",
+        data={
+            "grant_type": "authorization_code",
+            "client_id": client_id,
+            "code": code,
+            "code_verifier": verifier,
+            "redirect_uri": redirect,
+            "resource": f"{base}/mcp",
+        },
+    )
+
+
+def grant(base, space, read_only=False):
+    client_id = register(base).json()["client_id"]
+    verifier, challenge = pkce()
+    code = code_from(approve(base, client_id, challenge, space=space, read_only=read_only))
+    tokens = exchange(base, client_id, code, verifier).json()
+    return {**tokens, "client_id": client_id}
+
+
+class FakeGoogle(BaseHTTPRequestHandler):
+    """Stands in for Google's token endpoint. The code carries the claims to return."""
+
+    vectors = {}
+    related = [{"car", "vehicle", "honda", "civic", "drive"}, {"allergic", "peanuts", "food", "restrictions"}]
+
+    def reply(self, value, status=200):
+        self.send_response(status)
+        self.end_headers()
+        self.wfile.write(json.dumps(value).encode())
+
+    def semantic(self, body):
+        if self.path == "/add":
+            if "failembed" in body["text"]:
+                return self.reply({}, 500)
+            type(self).vectors[body["id"]] = (body["space"], body["text"].lower())
+        elif self.path == "/remove":
+            type(self).vectors.pop(body["id"], None)
+        else:
+            query = set(body["text"].lower().split())
+            if "failsearch" in query:
+                return self.reply({}, 500)
+            matches = []
+            for memory_id, (space, text) in type(self).vectors.items():
+                if "leakcheck" in query:
+                    matches.append({"id": memory_id, "score": 0.9})
+                elif space == body["space"]:
+                    words = set(text.replace(".", "").split())
+                    near = any(query & group and words & group for group in self.related)
+                    matches.append({"id": memory_id, "score": 0.8 if near else 0.3})
+            return self.reply({"matches": matches})
+        return self.reply({})
+
+    def do_POST(self):
+        if self.path in ("/add", "/query", "/remove"):
+            return self.semantic(json.loads(self.rfile.read(int(self.headers["content-length"]))))
+        form = parse_qs(self.rfile.read(int(self.headers["content-length"])).decode())
+        if form["client_secret"] != [GOOGLE_CLIENT_SECRET]:
+            self.send_response(400)
+            self.end_headers()
+            return
+        payload = base64.urlsafe_b64decode(form["code"][0]).rstrip(b"=")
+        token = "x." + base64.urlsafe_b64encode(payload).decode().rstrip("=") + ".x"
+        body = json.dumps({"id_token": token}).encode()
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+@pytest.fixture(scope="module")
+def env(tmp_path_factory):
+    tmp = tmp_path_factory.mktemp("memem")
+    persist = tmp / "state"
+    subprocess.run(
+        ["npx", "--yes", "wrangler", "d1", "migrations", "apply", "memem", "--local", "--persist-to", str(persist)],
+        check=True,
+        capture_output=True,
+        env=WRANGLER_ENV,
+        stdin=subprocess.DEVNULL,
+    )
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    base = f"http://127.0.0.1:{port}"
+    fake = ThreadingHTTPServer(("127.0.0.1", 0), FakeGoogle)
+    Thread(target=fake.serve_forever, daemon=True).start()
+    fake_base = f"http://127.0.0.1:{fake.server_address[1]}"
+    log_path = tmp / "server.log"
+    with open(log_path, "w") as log:
+        proc = subprocess.Popen(
+            ["uv", "run", "pywrangler", "dev", "--env", "test", "--port", str(port), "--persist-to", str(persist),
+             "--var", f"MEMEM_SEMANTIC_TEST_BASE:{fake_base}",
+             "--var", f"GOOGLE_CLIENT_ID:{GOOGLE_CLIENT_ID}", "--var", f"GOOGLE_CLIENT_SECRET:{GOOGLE_CLIENT_SECRET}",
+             "--var", f"MEMEM_OWNER_EMAIL:{OWNER_EMAIL}", "--var", f"MEMEM_GOOGLE_TEST_BASE:{fake_base}"],
+            env=WRANGLER_ENV,
+            stdout=log,
+            stderr=log,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    try:
+        for _ in range(240):
+            try:
+                if httpx.get(f"{base}/health", timeout=60).status_code == 200:
+                    break
+            except httpx.TransportError:
+                pass
+            time.sleep(0.5)
+        else:
+            raise RuntimeError(log_path.read_text())
+        tokens = {
+            "claude": grant(base, "work"),
+            "chatgpt": grant(base, "work"),
+            "reader": grant(base, "work", read_only=True),
+            "personal": grant(base, "home"),
+        }
+        yield {"base": base, "tokens": tokens, "persist": persist}
+    finally:
+        os.killpg(proc.pid, signal.SIGTERM)
+        proc.wait()
+        fake.shutdown()
+
+
+@pytest.fixture
+def anyio_backend():
+    return "asyncio"
+
+
+@pytest.fixture(params=["auto", "legacy"])
+def mode(request):
+    return request.param
+
+
+def client(env, name, mode="auto"):
+    headers = {"authorization": f"Bearer {env['tokens'][name]['access_token']}"}
+    http = httpx2.AsyncClient(headers=headers, timeout=60)
+    return Client(streamable_http_client(f"{env['base']}/mcp", http_client=http), mode=mode)
+
+
+async def call(c, tool, **args):
+    result = await c.call_tool(tool, args)
+    assert not result.is_error, result
+    return json.loads(result.content[0].text)
+
+
+def post(target, token=None):
+    headers = {**ACCEPT, **({"authorization": f"Bearer {token}"} if token else {})}
+    return httpx.post(target, headers=headers, json=TOOLS_LIST)
+
+
+def test_unauthenticated_requests_point_to_discovery(env):
+    base = env["base"]
+    response = post(f"{base}/mcp")
+    assert response.status_code == 401
+    pointer = re.search(r'resource_metadata="([^"]+)"', response.headers["www-authenticate"]).group(1)
+    resource = httpx.get(pointer).json()
+    assert resource["resource"] == f"{base}/mcp"
+    assert resource["authorization_servers"] == [base]
+    server = httpx.get(f"{base}/.well-known/oauth-authorization-server").json()
+    assert server["issuer"] == base
+    assert server["code_challenge_methods_supported"] == ["S256"]
+    assert server["token_endpoint_auth_methods_supported"] == ["none"]
+
+
+def test_tokens_in_urls_are_gone(env):
+    token = env["tokens"]["claude"]["access_token"]
+    assert post(f"{env['base']}/mcp/{token}").status_code == 404
+
+
+@pytest.mark.parametrize("redirect", [
+    CLAUDE_REDIRECT, CHATGPT_REDIRECT, "https://chatgpt.com/connector/oauth/abc123", "http://localhost:3118/callback",
+])
+def test_known_redirects_register(env, redirect):
+    assert register(env["base"], redirect).status_code == 201
+
+
+@pytest.mark.parametrize("redirect", [
+    "https://evil.example/callback",
+    "https://claude.ai.evil.example/api/mcp/auth_callback",
+    "https://claude.ai/other",
+    "http://claude.ai/api/mcp/auth_callback",
+    "https://chatgpt.com/evil",
+    "https://user@claude.ai/api/mcp/auth_callback",
+    "javascript:alert(1)",
+])
+def test_unknown_redirects_are_refused(env, redirect):
+    assert register(env["base"], redirect).status_code == 400
+
+
+def test_consent_page_shows_destination_and_escapes(env):
+    base = env["base"]
+    client_id = register(base, CLAUDE_REDIRECT).json()["client_id"]
+    _, challenge = pkce()
+    page = httpx.get(f"{base}/oauth/authorize", params={
+        "client_id": client_id, "redirect_uri": CLAUDE_REDIRECT, "response_type": "code",
+        "code_challenge": challenge, "code_challenge_method": "S256", "state": '"><script>alert(1)</script>',
+    })
+    assert page.status_code == 200
+    assert "claude.ai" in page.text and "<script>" not in page.text
+    assert page.headers["x-frame-options"] == "DENY"
+
+
+def test_authorize_refuses_unregistered_redirect(env):
+    base = env["base"]
+    client_id = register(base, CLAUDE_REDIRECT).json()["client_id"]
+    _, challenge = pkce()
+    response = approve(base, client_id, challenge, redirect=CHATGPT_REDIRECT)
+    assert response.status_code == 400 and "location" not in response.headers
+
+
+def start(env):
+    base = env["base"]
+    client_id = register(base).json()["client_id"]
+    return base, client_id, pkce()[1]
+
+
+@pytest.mark.parametrize("overrides", [
+    {"email": "someone.else@example.com"},
+    {"email_verified": False},
+    {"aud": "another-app"},
+    {"iss": "https://evil.example"},
+    {"exp": 1},
+    {"nonce": "wrong"},
+])
+def test_bad_google_identity_is_refused(env, overrides):
+    base, client_id, challenge = start(env)
+    response = approve(base, client_id, challenge, **overrides)
+    assert response.status_code == 403 and "location" not in response.headers
+
+
+def test_email_match_ignores_case(env):
+    base, client_id, challenge = start(env)
+    assert approve(base, client_id, challenge, email=OWNER_EMAIL.upper()).status_code == 302
+
+
+def test_consent_form_needs_this_browsers_cookie(env):
+    base, client_id, challenge = start(env)
+    _, session, fields = open_consent(authorize_url(base, client_id, challenge))
+    assert to_google(base, "other-browser", fields).status_code == 403
+    assert httpx.post(f"{base}/oauth/authorize", data={**fields, "space": "work"}).status_code == 403
+
+
+def test_callback_needs_the_browser_that_started_it(env):
+    base, client_id, challenge = start(env)
+    response = approve(base, client_id, challenge, session_override="other-browser")
+    assert response.status_code == 403 and "location" not in response.headers
+
+
+def test_callback_works_only_once(env):
+    base, client_id, challenge = start(env)
+    _, session, fields = open_consent(authorize_url(base, client_id, challenge))
+    google = {k: v[0] for k, v in parse_qs(urlsplit(to_google(base, session, fields).headers["location"]).query).items()}
+    query = {"state": google["state"], "code": fake_code(claims(google["nonce"]))}
+    assert callback(base, query, session).status_code == 302
+    assert callback(base, query, session).status_code == 400
+
+
+def test_google_cancel_issues_nothing(env):
+    base, client_id, challenge = start(env)
+    _, session, fields = open_consent(authorize_url(base, client_id, challenge))
+    state = parse_qs(urlsplit(to_google(base, session, fields).headers["location"]).query)["state"][0]
+    response = callback(base, {"state": state, "error": "access_denied"}, session)
+    assert response.status_code == 400 and "location" not in response.headers
+
+
+def test_google_redirect_asks_for_identity_only(env):
+    base, client_id, challenge = start(env)
+    _, session, fields = open_consent(authorize_url(base, client_id, challenge))
+    google = parse_qs(urlsplit(to_google(base, session, fields).headers["location"]).query)
+    assert google["scope"] == ["openid email"]
+    assert google["redirect_uri"] == [f"{base}/oauth/google/callback"]
+
+
+def test_redirect_includes_state_and_issuer(env):
+    base = env["base"]
+    client_id = register(base).json()["client_id"]
+    _, challenge = pkce()
+    query = parse_qs(urlsplit(approve(base, client_id, challenge).headers["location"]).query)
+    assert query["state"] == ["xyz"] and query["iss"] == [base]
+
+
+def test_loopback_port_may_change(env):
+    base = env["base"]
+    client_id = register(base, "http://127.0.0.1/callback").json()["client_id"]
+    _, challenge = pkce()
+    assert approve(base, client_id, challenge, redirect="http://127.0.0.1:4567/callback").status_code == 302
+
+
+def test_code_needs_correct_verifier_and_works_once(env):
+    base = env["base"]
+    client_id = register(base).json()["client_id"]
+    verifier, challenge = pkce()
+    code = code_from(approve(base, client_id, challenge))
+    assert exchange(base, client_id, code, pkce()[0]).json()["error"] == "invalid_grant"
+    # A failed attempt burns the code.
+    assert exchange(base, client_id, code, verifier).status_code == 400
+
+    code = code_from(approve(base, client_id, challenge))
+    assert exchange(base, client_id, code, verifier).status_code == 200
+    assert exchange(base, client_id, code, verifier).json()["error"] == "invalid_grant"
+
+
+def test_refresh_rotates_and_old_tokens_stop(env):
+    base = env["base"]
+    first = grant(base, "rotate")
+    form = {"grant_type": "refresh_token", "client_id": first["client_id"], "refresh_token": first["refresh_token"]}
+    second = httpx.post(f"{base}/oauth/token", data=form).json()
+    assert post(f"{base}/mcp", second["access_token"]).status_code == 200
+    assert post(f"{base}/mcp", first["access_token"]).status_code == 401
+    assert httpx.post(f"{base}/oauth/token", data=form).json()["error"] == "invalid_grant"
+    wrong = {**form, "refresh_token": second["refresh_token"], "client_id": "client_other"}
+    assert httpx.post(f"{base}/oauth/token", data=wrong).json()["error"] == "invalid_grant"
+
+
+def test_expired_access_token_is_refused(env):
+    base = env["base"]
+    tokens = grant(base, "expires")
+    assert post(f"{base}/mcp", tokens["access_token"]).status_code == 200
+    d1(env["persist"], "UPDATE connections SET access_expires_at = 1 WHERE space = 'expires'")
+    assert post(f"{base}/mcp", tokens["access_token"]).status_code == 401
+
+
+@pytest.mark.anyio
+async def test_memory_shared_between_assistants(env, mode):
+    async with client(env, "claude", mode) as a, client(env, "chatgpt", mode) as b:
+        saved = await call(a, "remember", content=f"Project Falcon ships in March {mode}")
+        found = await call(b, "recall", query=f"falcon {mode}")
+    assert found["memories"][0]["id"] == saved["id"]
+    assert found["memories"][0]["source"].startswith("local-")
+
+
+def test_static_bearer_connection_and_revoke(env):
+    done = memem(env["persist"], "connect", "doomed", "--space", "work")
+    assert done.returncode == 0, done.stderr
+    token = re.search(r"^Token: (\S+)$", done.stdout, re.M).group(1)
+    target = f"{env['base']}/mcp"
+    assert post(target, token).status_code == 200
+    assert memem(env["persist"], "revoke", "doomed").returncode == 0
+    assert post(target, token).status_code == 401
+
+
+@pytest.mark.anyio
+async def test_spaces_are_isolated(env, mode):
+    word = f"secretword{mode}"
+    async with client(env, "claude", mode) as work, client(env, "personal", mode) as home:
+        saved = await call(work, "remember", content=word)
+        assert (await call(home, "recall", query=word))["memories"] == []
+        assert (await call(home, "forget", id=saved["id"]))["deleted"] is False
+        assert len((await call(work, "recall", query=word))["memories"]) == 1
+
+
+@pytest.mark.anyio
+async def test_read_only_has_no_write_tools(env, mode):
+    async with client(env, "reader", mode) as c:
+        assert [t.name for t in (await c.list_tools()).tools] == ["recall"]
+        assert (await c.call_tool("remember", {"content": "readonlyattempt"})).is_error
+        assert (await call(c, "recall", query="readonlyattempt"))["memories"] == []
+
+
+@pytest.mark.anyio
+async def test_invalid_arguments_are_rejected(env, mode):
+    async with client(env, "claude", mode) as c:
+        assert (await c.call_tool("remember", {"content": ""})).is_error
+        assert (await c.call_tool("remember", {"content": "x" * 10_001})).is_error
+
+
+def test_oversized_bodies_rejected(env):
+    token = env["tokens"]["claude"]["access_token"]
+    response = httpx.post(
+        f"{env['base']}/mcp",
+        headers={**ACCEPT, "authorization": f"Bearer {token}", "content-type": "application/json"},
+        content=b"x" * (300 * 1024),
+    )
+    assert response.status_code == 413
+
+
+def test_no_plaintext_tokens_at_rest(env):
+    post(f"{env['base']}/mcp", env["tokens"]["claude"]["access_token"])
+    files = [p for p in (env["persist"] / "v3" / "d1").rglob("*") if p.is_file()]
+    assert any(p.suffix == ".sqlite" for p in files)
+    data = b"".join(p.read_bytes() for p in files)
+    for tokens in env["tokens"].values():
+        assert tokens["access_token"].encode() not in data
+        assert tokens["refresh_token"].encode() not in data
+
+
+@pytest.mark.anyio
+async def test_like_wildcards_are_literal(env):
+    async with client(env, "personal") as c:
+        await call(c, "remember", content="discount is 50% today")
+        await call(c, "remember", content="discount is 50 dollars")
+        found = await call(c, "recall", query="50%")
+    assert [m["content"] for m in found["memories"]] == ["discount is 50% today"]
+
+
+def test_cli_rejects_bad_input_and_duplicates(env):
+    assert memem(env["persist"], "connect", "x'; DROP TABLE memories;--", "--space", "s").returncode == 1
+    assert memem(env["persist"], "connect", "dup", "--space", "s").returncode == 0
+    assert memem(env["persist"], "connect", "dup", "--space", "s").returncode == 1
+
+
+@pytest.mark.anyio
+async def test_concurrent_requests_stay_in_their_own_space(env):
+    async with client(env, "claude") as work, client(env, "personal") as home:
+        await call(work, "remember", content="racemarker workside")
+        await call(home, "remember", content="racemarker homeside")
+
+        async def check(c, expected):
+            memories = (await call(c, "recall", query="racemarker"))["memories"]
+            assert [m["content"] for m in memories] == [f"racemarker {expected}"]
+
+        await asyncio.gather(*(check(c, e) for _ in range(25) for c, e in ((work, "workside"), (home, "homeside"))))
+
+
+class MemoryTokenStorage:
+    def __init__(self):
+        self.tokens = None
+        self.client_info = None
+
+    async def get_tokens(self):
+        return self.tokens
+
+    async def set_tokens(self, tokens):
+        self.tokens = tokens
+
+    async def get_client_info(self):
+        return self.client_info
+
+    async def set_client_info(self, client_info):
+        self.client_info = client_info
+
+
+@pytest.mark.anyio
+async def test_official_sdk_oauth_client_completes_the_flow(env):
+    base = env["base"]
+    result = {}
+
+    async def redirect_handler(url):
+        response = await asyncio.to_thread(sign_in, base, url, "sdkflow")
+        assert response.status_code == 302, response.text
+        query = parse_qs(urlsplit(response.headers["location"]).query)
+        result.update(code=query["code"][0], state=query["state"][0], iss=query["iss"][0])
+
+    async def callback_handler():
+        return AuthorizationCodeResult(code=result["code"], state=result["state"], iss=result["iss"])
+
+    provider = OAuthClientProvider(
+        server_url=f"{base}/mcp",
+        client_metadata=OAuthClientMetadata(
+            redirect_uris=[LOCAL_REDIRECT],
+            client_name="sdk",
+            grant_types=["authorization_code", "refresh_token"],
+            response_types=["code"],
+            token_endpoint_auth_method="none",
+        ),
+        storage=MemoryTokenStorage(),
+        redirect_handler=redirect_handler,
+        callback_handler=callback_handler,
+    )
+    http = httpx2.AsyncClient(auth=provider, timeout=60)
+    async with Client(streamable_http_client(f"{base}/mcp", http_client=http), mode="legacy") as c:
+        saved = await call(c, "remember", content="saved through sdk oauth")
+        found = await call(c, "recall", query="sdk oauth")
+    assert found["memories"][0]["id"] == saved["id"]
+
+
+@pytest.mark.anyio
+async def test_recall_finds_meaning_without_shared_words(env):
+    async with client(env, "claude") as c:
+        await call(c, "remember", content="I own a Honda Civic.")
+        await call(c, "remember", content="Bananas are on sale.")
+        found = await call(c, "recall", query="vehicle")
+    assert [m["content"] for m in found["memories"]] == ["I own a Honda Civic."]
+
+
+@pytest.mark.anyio
+async def test_low_similarity_results_are_dropped(env):
+    async with client(env, "personal") as c:
+        await call(c, "remember", content="Unrelated gardening note zzq")
+        found = await call(c, "recall", query="quantum chromodynamics")
+    assert found["memories"] == []
+
+
+@pytest.mark.anyio
+async def test_common_words_do_not_match_everything(env):
+    async with client(env, "personal") as c:
+        await call(c, "remember", content="This is about the thing with it zzr")
+        found = await call(c, "recall", query="what is the kumquat")
+    assert all("zzr" not in m["content"] for m in found["memories"])
+
+
+@pytest.mark.anyio
+async def test_matching_both_ways_ranks_first(env):
+    async with client(env, "chatgpt") as c:
+        await call(c, "remember", content="The honda dealership zzs")
+        await call(c, "remember", content="My vehicle inspection zzs is due")
+        found = await call(c, "recall", query="vehicle zzs")
+    assert found["memories"][0]["content"] == "My vehicle inspection zzs is due"
+
+
+@pytest.mark.anyio
+async def test_failed_embedding_still_saves_and_keywords_work(env):
+    async with client(env, "personal") as c:
+        await call(c, "remember", content="failembed zzt saved anyway")
+        found = await call(c, "recall", query="zzt")
+    assert [m["content"] for m in found["memories"]] == ["failembed zzt saved anyway"]
+
+
+@pytest.mark.anyio
+async def test_failed_meaning_search_falls_back_to_keywords(env):
+    async with client(env, "personal") as c:
+        await call(c, "remember", content="zzu fallback note")
+        found = await call(c, "recall", query="failsearch zzu")
+    assert [m["content"] for m in found["memories"]] == ["zzu fallback note"]
+
+
+@pytest.mark.anyio
+async def test_wrong_vector_results_cannot_cross_spaces(env):
+    async with client(env, "claude") as work, client(env, "personal") as home:
+        await call(work, "remember", content="zzv private work detail")
+        found = await call(home, "recall", query="leakcheck")
+    assert all("zzv" not in m["content"] for m in found["memories"])
+
+
+@pytest.mark.anyio
+async def test_forget_removes_the_vector_only_for_its_own_space(env):
+    async with client(env, "claude") as work, client(env, "personal") as home:
+        saved = await call(work, "remember", content="zzw honda parking pass")
+        assert saved["id"] in FakeGoogle.vectors
+        assert (await call(home, "forget", id=saved["id"]))["deleted"] is False
+        assert saved["id"] in FakeGoogle.vectors
+        assert (await call(work, "forget", id=saved["id"]))["deleted"] is True
+        assert saved["id"] not in FakeGoogle.vectors

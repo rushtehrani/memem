@@ -1,0 +1,25 @@
+{
+  "name": "memem",
+  "main": "src/entry.py",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["python_workers"],
+  // Request URLs can contain tokens, so Workers Logs stay off.
+  "observability": { "enabled": false },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "memem",
+      "database_id": "b62874b4-d8bc-4875-b0b6-4486481b4988"
+    }
+  ],
+  "ai": { "binding": "AI" },
+  "vectorize": [{ "binding": "VECTORIZE", "index_name": "memem" }],
+  // Used by the test suite, which replaces AI and Vectorize with a local stand-in.
+  "env": {
+    "test": {
+      "d1_databases": [
+        { "binding": "DB", "database_name": "memem", "database_id": "b62874b4-d8bc-4875-b0b6-4486481b4988" }
+      ]
+    }
+  }
+}
