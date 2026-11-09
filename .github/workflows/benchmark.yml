@@ -1,0 +1,30 @@
+name: Benchmark
+
+on:
+  push:
+    branches: [longmemeval-benchmark]
+  workflow_dispatch:
+    inputs:
+      questions:
+        description: Number of LongMemEval questions
+        default: "100"
+
+permissions:
+  contents: read
+
+jobs:
+  longmemeval:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Run LongMemEval
+        env:
+          QUESTIONS: ${{ inputs.questions || '100' }}
+        run: uv run --no-project --python 3.12 --with fastembed --with numpy python benchmarks/longmemeval.py --questions "$QUESTIONS"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: longmemeval-results
+          path: .benchmark/results.json
+          include-hidden-files: true
