@@ -149,6 +149,8 @@ def score(ranked_sessions, gold):
     seen = list(dict.fromkeys(ranked_sessions))
     rank = next((i for i, session in enumerate(seen, 1) if session in gold), None)
     return {
+        # The strict measure: is an answer conversation among the first 5 results an assistant actually receives?
+        "first 5 results": float(bool(gold & set(ranked_sessions[:5]))),
         "hit@5": float(rank is not None and rank <= 5),
         "hit@10": float(rank is not None and rank <= 10),
         "recall@10": len(gold & set(seen[:10])) / len(gold),
@@ -184,42 +186,58 @@ def average(rows):
     return {key: statistics.fmean(row[key] for row in rows) for key in rows[0]}
 
 
+def summarize(rows, seed):
+    by_mode, by_type = defaultdict(list), defaultdict(list)
+    for row in rows:
+        for mode, result in row["results"].items():
+            by_mode[mode].append(result)
+        by_type[row["type"]].append(row["results"]["hybrid, cutoff 0.52"])
+
+    summary = {
+        "questions": len(rows),
+        "pieces": sum(row["pieces"] for row in rows),
+        "seed": seed,
+        "modes": {mode: average(results) for mode, results in by_mode.items()},
+        "hybrid_0.52_by_type": {kind: {"n": len(results), **average(results)} for kind, results in sorted(by_type.items())},
+    }
+    (CACHE / "results.json").write_text(json.dumps(summary, indent=2))
+
+    print(f"\n{'mode':<28}{'first 5':>9}{'hit@5':>8}{'hit@10':>8}{'recall@10':>11}{'mrr':>7}{'returned':>10}")
+    for mode, row in summary["modes"].items():
+        print(f"{mode:<28}{row['first 5 results']:>9.3f}{row['hit@5']:>8.3f}{row['hit@10']:>8.3f}{row['recall@10']:>11.3f}{row['mrr']:>7.3f}{row['returned']:>10.1f}")
+    print(f"\n{'hybrid 0.52, by type':<28}{'n':>5}{'first 5':>9}{'hit@5':>8}{'recall@10':>11}")
+    for kind, row in summary["hybrid_0.52_by_type"].items():
+        print(f"{kind:<28}{row['n']:>5}{row['first 5 results']:>9.3f}{row['hit@5']:>8.3f}{row['recall@10']:>11.3f}")
+
+
 async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--questions", type=int, default=100)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--shard", type=int, default=0, help="which part of the questions to run")
+    parser.add_argument("--shards", type=int, default=1, help="how many parts to split the questions into")
+    parser.add_argument("--merge", action="store_true", help="combine the rows-*.json files from finished shards")
     args = parser.parse_args()
 
-    questions = load_questions(args.questions, args.seed)
+    if args.merge:
+        rows = [row for path in sorted(CACHE.glob("rows-*.json")) for row in json.loads(path.read_text())]
+        summarize(rows, args.seed)
+        return
+
+    questions = load_questions(args.questions, args.seed)[args.shard :: args.shards]
     print("Loading the embedding model...", flush=True)
     embed = Embedder()
     # One pass, so the worker processes only start once.
     embed.prepare([text for q in questions for session in q["haystack_sessions"] for text in chunks(session)] + [q["question"] for q in questions])
-    by_mode, by_type, pieces, start = defaultdict(list), defaultdict(list), 0, time.time()
+    rows, start = [], time.time()
     for done, question in enumerate(questions, 1):
         results, count = await evaluate(question, embed)
-        pieces += count
-        for mode, row in results.items():
-            by_mode[mode].append(row)
-        by_type[question["question_type"]].append(results["hybrid, cutoff 0.52"])
+        rows.append({"type": question["question_type"], "pieces": count, "results": results})
         if done % 5 == 0 or done == len(questions):
-            print(f"{done}/{len(questions)} questions, {pieces} pieces, {time.time() - start:.0f}s", flush=True)
+            print(f"{done}/{len(questions)} questions, {sum(r['pieces'] for r in rows)} pieces, {time.time() - start:.0f}s", flush=True)
 
-    summary = {
-        "questions": len(questions),
-        "pieces": pieces,
-        "seed": args.seed,
-        "modes": {mode: average(rows) for mode, rows in by_mode.items()},
-        "hybrid_0.52_by_type": {kind: {"n": len(rows), **average(rows)} for kind, rows in sorted(by_type.items())},
-    }
-    (CACHE / "results.json").write_text(json.dumps(summary, indent=2))
-
-    print(f"\n{'mode':<28}{'hit@5':>8}{'hit@10':>8}{'recall@10':>11}{'mrr':>7}{'returned':>10}")
-    for mode, row in summary["modes"].items():
-        print(f"{mode:<28}{row['hit@5']:>8.3f}{row['hit@10']:>8.3f}{row['recall@10']:>11.3f}{row['mrr']:>7.3f}{row['returned']:>10.1f}")
-    print(f"\n{'hybrid 0.52, by type':<28}{'n':>5}{'hit@5':>8}{'recall@10':>11}")
-    for kind, row in summary["hybrid_0.52_by_type"].items():
-        print(f"{kind:<28}{row['n']:>5}{row['hit@5']:>8.3f}{row['recall@10']:>11.3f}")
+    (CACHE / f"rows-{args.shard}.json").write_text(json.dumps(rows))
+    summarize(rows, args.seed)
 
 
 if __name__ == "__main__":
