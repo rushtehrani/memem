@@ -10,7 +10,7 @@ cannot get it. memem needs to hold the file so every connected app can reach it.
 ## Decision: files are attachments on memories
 
 Files of any type can be attached to a memory. memem stores it whole and never reads or indexes it. The memory's text
-describes the file, so the existing `memory_search` finds it by meaning:
+describes the file, so the existing `search_memories` finds it by meaning:
 
 ```text
 Memory 12:  Q3 launch assets: logos, copy and the final deck, made in ChatGPT.
@@ -21,7 +21,6 @@ Memory 12:  Q3 launch assets: logos, copy and the final deck, made in ChatGPT.
 - A memory can have up to 20 attachments.
 - Every file has a description, because the memory is created with it. There are no orphaned files.
 - Attachment bytes are never rewritten. Editing the memory changes only its description.
-- `context_` tools stay reserved for content that needs its own search, such as full chat history.
 
 Long text with no file goes in a memory, up to the 10,000-character limit, or is uploaded as a file.
 
@@ -38,30 +37,30 @@ Long text with no file goes in a memory, up to the 10,000-character limit, or is
 
 ## How it works
 
-1. In a chat, the user asks to save a file. `memory_upload_link` returns the upload page for this space. The user can
+1. In a chat, the user asks to save a file. `get_upload_link` returns the upload page for this space. The user can
    also open `/files` directly.
 2. The user signs in with Google, describes the files and chooses them on the page. Only the allowed account can upload.
 3. memem creates the memory and indexes its description as usual.
 4. The browser sends each file with `PUT`, one at a time, and the Worker streams it to R2 without buffering it. Files
    that fail can be retried, and the rest are kept.
-5. Any connected app finds the memory through `memory_search` or `memory_list`, with the attachment's name, size and
+5. Any connected app finds the memory through `search_memories` or `list_memories`, with the attachment's name, size and
    link in the result.
 6. Opening the link requires the same Google sign-in. The user downloads the file and attaches it to the other app.
 
-To add files to an existing memory, `memory_upload_link` takes an optional `memory_id`. A single file is removed with
+To add files to an existing memory, `get_upload_link` takes an optional `memory_id`. A single file is removed with
 the button on that memory's signed-in page, not through a tool.
 
 ## Tools
 
-Three new tools, all needing write access: `memory_upload_link`, with optional `memory_id`, and `memory_sandbox_upload`
-and `memory_sandbox_download` (see below).
+Three new tools, all needing write access: `get_upload_link`, with optional `memory_id`, and `get_sandbox_upload_url`
+and `get_sandbox_download_url` (see below).
 
 Changes to existing tools:
 
-- `memory_overview`, `memory_search` and `memory_list` include an `attachments` list when a memory has files, with a
+- `get_memory_overview`, `search_memories` and `list_memories` include an `attachments` list when a memory has files, with a
   note that browser links need the user's sign-in.
-- `memory_delete` deletes the attachments too, and its description says so.
-- `memory_add` asks assistants to say where a file lives when it isn't attached, so others don't assume they have it.
+- `delete_memory` deletes the attachments too, and its description says so.
+- `add_memory` asks assistants to say where a file lives when it isn't attached, so others don't assume they have it.
 
 The upload page URL contains only the space and memory id. Neither is a secret, since sign-in grants access.
 
@@ -87,7 +86,6 @@ Files go in a new R2 bucket `memem-files`. R2 keys are random, so they reveal no
 ## Not in the first version
 
 - Reading or searching file contents, or looking inside zip files.
-- Saving a whole chat, which has the verbatim problem described in the research notes.
 - Direct transfer from an app's sandbox.
 
 ## Phases
@@ -96,13 +94,13 @@ Files go in a new R2 bucket `memem-files`. R2 keys are random, so they reveal no
    streams, and all nine round trips were byte-for-byte intact. CPU time was 5-15 ms regardless of file size, with one
    82 ms cold start. No presigned URLs are needed. The real upload adds a sign-in check and D1 writes, so its CPU use
    should be measured against the 10 ms Workers Free limit.
-2. **Attachments, done.** The upload page, R2 storage, signed-in downloads, `memory_upload_link`, and the tool changes above.
+2. **Attachments, done.** The upload page, R2 storage, signed-in downloads, `get_upload_link`, and the tool changes above.
 3. **Sandbox uploads, done.** See below.
 
 ## Sandbox uploads
 
 Testing showed ChatGPT's sandbox can reach memem, Claude's can once the domain is allowed, and the Gemini app had no
-code execution. `memory_sandbox_upload` returns a `/files/direct/<token>` URL for the sandbox to `PUT` one file to.
+code execution. `get_sandbox_upload_url` returns a `/files/direct/<token>` URL for the sandbox to `PUT` one file to.
 
 The link needs no sign-in, because sandboxes can't do one, so it is limited instead: stored only as a hash, single-use,
 valid for 10 minutes, fixed to one space and file name, and able to add one file and read nothing. It does pass through
@@ -110,7 +108,7 @@ the model provider. The memory is created only when the upload arrives, so unuse
 
 ## Sandbox downloads
 
-`memory_sandbox_download` returns a `/files/fetch/<token>` URL for one attachment in the connection's space. It needs a
+`get_sandbox_download_url` returns a `/files/fetch/<token>` URL for one attachment in the connection's space. It needs a
 write connection, is stored only as a hash, works once, and expires after two minutes. R2 presigned URLs were rejected
 because they can be reused until they expire, need R2 credentials in the Worker, and use a second domain.
 

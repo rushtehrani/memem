@@ -11,6 +11,7 @@ from pyodide.ffi import to_js
 
 MAX_MEMORIES_PER_SPACE = 10_000
 MAX_ATTACHMENTS_PER_MEMORY = 20
+MAX_OVERVIEW_FILES = 10
 # Written into the SQL directly, because D1 fails on integers this large bound from Python.
 MAX_TOTAL_FILE_BYTES = 5 * 1024**3
 ABANDONED_UPLOAD_AGE = 3600
@@ -286,7 +287,19 @@ class Store:
             MAX_PINNED_ROWS,
         )
         count = await self._all("SELECT COUNT(*) AS total FROM memories WHERE space = ?", space)
-        return {"total": count[0]["total"], "pinned": await self._with_attachments(space, pinned)}
+        result = {"total": count[0]["total"], "pinned": await self._with_attachments(space, pinned)}
+        files = await self._all(
+            "SELECT public_id AS id, memory_id, name FROM attachments"
+            " WHERE space = ? AND uploading = 0 AND deleting = 0 ORDER BY attachments.id DESC LIMIT ?",
+            space,
+            MAX_OVERVIEW_FILES,
+        )
+        if files:
+            attached = await self._all(
+                "SELECT COUNT(*) AS total FROM attachments WHERE space = ? AND uploading = 0 AND deleting = 0", space
+            )
+            result["attachment_count"], result["recent_files"] = attached[0]["total"], files
+        return result
 
     async def _with_attachments(self, space: str, memories: list[dict]) -> list[dict]:
         if not memories:

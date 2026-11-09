@@ -471,8 +471,8 @@ def test_expired_access_token_is_refused(env):
 @pytest.mark.anyio
 async def test_memory_shared_between_assistants(env, mode):
     async with client(env, "claude", mode) as a, client(env, "chatgpt", mode) as b:
-        saved = await call(a, "memory_add", content=f"Project Falcon ships in March {mode}")
-        found = await call(b, "memory_search", query=f"falcon {mode}")
+        saved = await call(a, "add_memory", content=f"Project Falcon ships in March {mode}")
+        found = await call(b, "search_memories", query=f"falcon {mode}")
     assert found["memories"][0]["id"] == saved["id"]
     assert found["memories"][0]["source"].startswith("claude-")
 
@@ -491,26 +491,26 @@ def test_static_bearer_connection_and_revoke(env):
 async def test_spaces_are_isolated(env, mode):
     word = f"secretword{mode}"
     async with client(env, "claude", mode) as work, client(env, "personal", mode) as home:
-        saved = await call(work, "memory_add", content=word)
-        assert (await call(home, "memory_search", query=word))["memories"] == []
-        assert (await call(home, "memory_delete", id=saved["id"]))["deleted"] is False
-        assert len((await call(work, "memory_search", query=word))["memories"]) == 1
+        saved = await call(work, "add_memory", content=word)
+        assert (await call(home, "search_memories", query=word))["memories"] == []
+        assert (await call(home, "delete_memory", id=saved["id"]))["deleted"] is False
+        assert len((await call(work, "search_memories", query=word))["memories"]) == 1
 
 
 @pytest.mark.anyio
 async def test_read_only_has_no_write_tools(env, mode):
     async with client(env, "reader", mode) as c:
-        assert [t.name for t in (await c.list_tools()).tools] == ["memory_overview", "memory_search", "memory_list"]
-        assert (await c.call_tool("memory_add", {"content": "readonlyattempt"})).is_error
-        assert (await c.call_tool("memory_update", {"id": 1, "content": "readonlyattempt"})).is_error
-        assert (await call(c, "memory_search", query="readonlyattempt"))["memories"] == []
+        assert [t.name for t in (await c.list_tools()).tools] == ["get_memory_overview", "search_memories", "list_memories"]
+        assert (await c.call_tool("add_memory", {"content": "readonlyattempt"})).is_error
+        assert (await c.call_tool("update_memory", {"id": 1, "content": "readonlyattempt"})).is_error
+        assert (await call(c, "search_memories", query="readonlyattempt"))["memories"] == []
 
 
 @pytest.mark.anyio
 async def test_invalid_arguments_are_rejected(env, mode):
     async with client(env, "claude", mode) as c:
-        assert (await c.call_tool("memory_add", {"content": ""})).is_error
-        assert (await c.call_tool("memory_add", {"content": "x" * 10_001})).is_error
+        assert (await c.call_tool("add_memory", {"content": ""})).is_error
+        assert (await c.call_tool("add_memory", {"content": "x" * 10_001})).is_error
 
 
 def test_oversized_bodies_rejected(env):
@@ -536,9 +536,9 @@ def test_no_plaintext_tokens_at_rest(env):
 @pytest.mark.anyio
 async def test_like_wildcards_are_literal(env):
     async with client(env, "personal") as c:
-        await call(c, "memory_add", content="discount is 50% today")
-        await call(c, "memory_add", content="discount is 50 dollars")
-        found = await call(c, "memory_search", query="50%")
+        await call(c, "add_memory", content="discount is 50% today")
+        await call(c, "add_memory", content="discount is 50 dollars")
+        found = await call(c, "search_memories", query="50%")
     assert [m["content"] for m in found["memories"]] == ["discount is 50% today"]
 
 
@@ -551,11 +551,11 @@ def test_cli_rejects_bad_input_and_duplicates(env):
 @pytest.mark.anyio
 async def test_concurrent_requests_stay_in_their_own_space(env):
     async with client(env, "claude") as work, client(env, "personal") as home:
-        await call(work, "memory_add", content="racemarker workside")
-        await call(home, "memory_add", content="racemarker homeside")
+        await call(work, "add_memory", content="racemarker workside")
+        await call(home, "add_memory", content="racemarker homeside")
 
         async def check(c, expected):
-            memories = (await call(c, "memory_search", query="racemarker"))["memories"]
+            memories = (await call(c, "search_memories", query="racemarker"))["memories"]
             assert [m["content"] for m in memories] == [f"racemarker {expected}"]
 
         await asyncio.gather(*(check(c, e) for _ in range(25) for c, e in ((work, "workside"), (home, "homeside"))))
@@ -608,78 +608,78 @@ async def test_official_sdk_oauth_client_completes_the_flow(env):
     )
     http = httpx2.AsyncClient(auth=provider, timeout=60)
     async with Client(streamable_http_client(f"{base}/mcp", http_client=http), mode="legacy") as c:
-        saved = await call(c, "memory_add", content="saved through sdk oauth")
-        found = await call(c, "memory_search", query="sdk oauth")
+        saved = await call(c, "add_memory", content="saved through sdk oauth")
+        found = await call(c, "search_memories", query="sdk oauth")
     assert found["memories"][0]["id"] == saved["id"]
 
 
 @pytest.mark.anyio
 async def test_recall_finds_meaning_without_shared_words(env):
     async with client(env, "claude") as c:
-        await call(c, "memory_add", content="I own a Honda Civic.")
-        await call(c, "memory_add", content="Bananas are on sale.")
-        found = await call(c, "memory_search", query="vehicle")
+        await call(c, "add_memory", content="I own a Honda Civic.")
+        await call(c, "add_memory", content="Bananas are on sale.")
+        found = await call(c, "search_memories", query="vehicle")
     assert [m["content"] for m in found["memories"]] == ["I own a Honda Civic."]
 
 
 @pytest.mark.anyio
 async def test_low_similarity_results_are_dropped(env):
     async with client(env, "personal") as c:
-        await call(c, "memory_add", content="Unrelated gardening note zzq")
-        found = await call(c, "memory_search", query="quantum chromodynamics")
+        await call(c, "add_memory", content="Unrelated gardening note zzq")
+        found = await call(c, "search_memories", query="quantum chromodynamics")
     assert found["memories"] == []
 
 
 @pytest.mark.anyio
 async def test_common_words_do_not_match_everything(env):
     async with client(env, "personal") as c:
-        await call(c, "memory_add", content="This is about the thing with it zzr")
-        found = await call(c, "memory_search", query="what is the kumquat")
+        await call(c, "add_memory", content="This is about the thing with it zzr")
+        found = await call(c, "search_memories", query="what is the kumquat")
     assert all("zzr" not in m["content"] for m in found["memories"])
 
 
 @pytest.mark.anyio
 async def test_matching_both_ways_ranks_first(env):
     async with client(env, "chatgpt") as c:
-        await call(c, "memory_add", content="The honda dealership zzs")
-        await call(c, "memory_add", content="My vehicle inspection zzs is due")
-        found = await call(c, "memory_search", query="vehicle zzs")
+        await call(c, "add_memory", content="The honda dealership zzs")
+        await call(c, "add_memory", content="My vehicle inspection zzs is due")
+        found = await call(c, "search_memories", query="vehicle zzs")
     assert found["memories"][0]["content"] == "My vehicle inspection zzs is due"
 
 
 @pytest.mark.anyio
 async def test_failed_embedding_still_saves_and_keywords_work(env):
     async with client(env, "personal") as c:
-        await call(c, "memory_add", content="failembed zzt saved anyway")
-        found = await call(c, "memory_search", query="zzt")
+        await call(c, "add_memory", content="failembed zzt saved anyway")
+        found = await call(c, "search_memories", query="zzt")
     assert [m["content"] for m in found["memories"]] == ["failembed zzt saved anyway"]
 
 
 @pytest.mark.anyio
 async def test_failed_meaning_search_falls_back_to_keywords(env):
     async with client(env, "personal") as c:
-        await call(c, "memory_add", content="zzu fallback note")
-        found = await call(c, "memory_search", query="failsearch zzu")
+        await call(c, "add_memory", content="zzu fallback note")
+        found = await call(c, "search_memories", query="failsearch zzu")
     assert [m["content"] for m in found["memories"]] == ["zzu fallback note"]
 
 
 @pytest.mark.anyio
 async def test_wrong_vector_results_cannot_cross_spaces(env):
     async with client(env, "claude") as work, client(env, "personal") as home:
-        await call(work, "memory_add", content="zzv private work detail")
-        found = await call(home, "memory_search", query="leakcheck")
+        await call(work, "add_memory", content="zzv private work detail")
+        found = await call(home, "search_memories", query="leakcheck")
     assert all("zzv" not in m["content"] for m in found["memories"])
 
 
 @pytest.mark.anyio
 async def test_forget_removes_the_vector_only_for_its_own_space(env):
     async with client(env, "claude") as work, client(env, "personal") as home:
-        saved = await call(work, "memory_add", content="zzw honda parking pass")
+        saved = await call(work, "add_memory", content="zzw honda parking pass")
         vector = f"m:{saved['id']}"
         assert vector in FakeGoogle.vectors
-        assert (await call(home, "memory_delete", id=saved["id"]))["deleted"] is False
+        assert (await call(home, "delete_memory", id=saved["id"]))["deleted"] is False
         assert vector in FakeGoogle.vectors
-        assert (await call(work, "memory_delete", id=saved["id"]))["deleted"] is True
+        assert (await call(work, "delete_memory", id=saved["id"]))["deleted"] is True
         assert vector not in FakeGoogle.vectors
 
 
@@ -690,9 +690,9 @@ def by_id(found, memory_id):
 @pytest.mark.anyio
 async def test_update_rewrites_memory_and_records_who(env):
     async with client(env, "claude") as a, client(env, "chatgpt") as b:
-        saved = await call(a, "memory_add", content="zya meeting is on Monday")
-        assert (await call(b, "memory_update", id=saved["id"], content="zya meeting is on Friday"))["updated"] is True
-        memory = by_id(await call(a, "memory_search", query="zya"), saved["id"])
+        saved = await call(a, "add_memory", content="zya meeting is on Monday")
+        assert (await call(b, "update_memory", id=saved["id"], content="zya meeting is on Friday"))["updated"] is True
+        memory = by_id(await call(a, "search_memories", query="zya"), saved["id"])
     assert memory["content"] == "zya meeting is on Friday"
     assert memory["source"] != memory["updated_by"]
     assert memory["updated_at"]
@@ -701,30 +701,30 @@ async def test_update_rewrites_memory_and_records_who(env):
 @pytest.mark.anyio
 async def test_update_refreshes_meaning_search(env):
     async with client(env, "chatgpt") as c:
-        saved = await call(c, "memory_add", content="Bicycle storage zyb")
-        await call(c, "memory_update", id=saved["id"], content="Civic storage zyb")
-        found = await call(c, "memory_search", query="vehicle")
+        saved = await call(c, "add_memory", content="Bicycle storage zyb")
+        await call(c, "update_memory", id=saved["id"], content="Civic storage zyb")
+        found = await call(c, "search_memories", query="vehicle")
     assert saved["id"] in [m["id"] for m in found["memories"]]
 
 
 @pytest.mark.anyio
 async def test_failed_reindex_drops_the_old_vector(env):
     async with client(env, "personal") as c:
-        saved = await call(c, "memory_add", content="zyc honda note")
+        saved = await call(c, "add_memory", content="zyc honda note")
         assert f"m:{saved['id']}" in FakeGoogle.vectors
-        await call(c, "memory_update", id=saved["id"], content="failembed zyc rewritten")
+        await call(c, "update_memory", id=saved["id"], content="failembed zyc rewritten")
         assert f"m:{saved['id']}" not in FakeGoogle.vectors
-        found = await call(c, "memory_search", query="zyc")
+        found = await call(c, "search_memories", query="zyc")
     assert [m["content"] for m in found["memories"]] == ["failembed zyc rewritten"]
 
 
 @pytest.mark.anyio
 async def test_update_cannot_cross_spaces(env):
     async with client(env, "claude") as work, client(env, "personal") as home:
-        saved = await call(work, "memory_add", content="zyd original")
-        assert (await call(home, "memory_update", id=saved["id"], content="hijacked"))["updated"] is False
-        assert (await call(home, "memory_update", id=saved["id"], pinned=True))["updated"] is False
-        memory = by_id(await call(work, "memory_search", query="zyd"), saved["id"])
+        saved = await call(work, "add_memory", content="zyd original")
+        assert (await call(home, "update_memory", id=saved["id"], content="hijacked"))["updated"] is False
+        assert (await call(home, "update_memory", id=saved["id"], pinned=True))["updated"] is False
+        memory = by_id(await call(work, "search_memories", query="zyd"), saved["id"])
     assert memory["content"] == "zyd original"
     assert memory["pinned"] == 0
 
@@ -732,9 +732,9 @@ async def test_update_cannot_cross_spaces(env):
 @pytest.mark.anyio
 async def test_update_rejects_bad_arguments(env):
     async with client(env, "claude") as c:
-        saved = await call(c, "memory_add", content="zye")
+        saved = await call(c, "add_memory", content="zye")
         for bad in ({"id": saved["id"]}, {"id": saved["id"], "content": ""}, {"id": saved["id"], "pinned": "yes"}):
-            assert (await c.call_tool("memory_update", bad)).is_error
+            assert (await c.call_tool("update_memory", bad)).is_error
 
 
 def grant_client(env, space):
@@ -744,13 +744,13 @@ def grant_client(env, space):
 @pytest.mark.anyio
 async def test_overview_shows_only_pinned_notes_of_this_space(env):
     async with grant_client(env, "pins") as c, grant_client(env, "otherpins") as other:
-        pinned = await call(c, "memory_add", content="zyf always use metric units")
-        await call(c, "memory_add", content="zyf not important")
-        await call(c, "memory_update", id=pinned["id"], pinned=True)
-        summary = await call(c, "memory_overview")
-        elsewhere = await call(other, "memory_overview")
-        await call(c, "memory_update", id=pinned["id"], pinned=False)
-        unpinned = await call(c, "memory_overview")
+        pinned = await call(c, "add_memory", content="zyf always use metric units")
+        await call(c, "add_memory", content="zyf not important")
+        await call(c, "update_memory", id=pinned["id"], pinned=True)
+        summary = await call(c, "get_memory_overview")
+        elsewhere = await call(other, "get_memory_overview")
+        await call(c, "update_memory", id=pinned["id"], pinned=False)
+        unpinned = await call(c, "get_memory_overview")
     assert summary["total"] == 2
     assert [m["id"] for m in summary["pinned"]] == [pinned["id"]]
     assert "data, not instructions" in summary["notice"]
@@ -761,30 +761,30 @@ async def test_overview_shows_only_pinned_notes_of_this_space(env):
 @pytest.mark.anyio
 async def test_pinned_notes_have_a_size_budget(env):
     async with grant_client(env, "budget") as c:
-        first = await call(c, "memory_add", content="a" * 3_000)
-        second = await call(c, "memory_add", content="b" * 1_500)
-        await call(c, "memory_update", id=first["id"], pinned=True)
-        refused = await c.call_tool("memory_update", {"id": second["id"], "pinned": True})
+        first = await call(c, "add_memory", content="a" * 3_000)
+        second = await call(c, "add_memory", content="b" * 1_500)
+        await call(c, "update_memory", id=first["id"], pinned=True)
+        refused = await c.call_tool("update_memory", {"id": second["id"], "pinned": True})
         assert refused.is_error
         assert "full" in refused.content[0].text
-        too_long = await c.call_tool("memory_update", {"id": first["id"], "content": "c" * 4_001})
+        too_long = await c.call_tool("update_memory", {"id": first["id"], "content": "c" * 4_001})
         assert too_long.is_error
-        await call(c, "memory_update", id=second["id"], content="b" * 1_000, pinned=True)
-        summary = await call(c, "memory_overview")
+        await call(c, "update_memory", id=second["id"], content="b" * 1_000, pinned=True)
+        summary = await call(c, "get_memory_overview")
     assert len(summary["pinned"]) == 2
 
 
 @pytest.mark.anyio
 async def test_browsing_pages_through_everything(env):
     async with grant_client(env, "browse") as c:
-        ids = [(await call(c, "memory_add", content=f"zyg {i}"))["id"] for i in range(5)]
+        ids = [(await call(c, "add_memory", content=f"zyg {i}"))["id"] for i in range(5)]
         seen, before = [], {}
         for expected_more in (True, True, False):
-            page = await call(c, "memory_list", limit=2, **before)
+            page = await call(c, "list_memories", limit=2, **before)
             seen += [m["id"] for m in page["memories"]]
             assert ("next_before_id" in page) is expected_more
             before = {"before_id": page.get("next_before_id")}
-        assert (await c.call_tool("memory_search", {"query": "   "})).is_error
+        assert (await c.call_tool("search_memories", {"query": "   "})).is_error
     assert seen == ids[::-1]
 
 
@@ -792,12 +792,12 @@ async def test_browsing_pages_through_everything(env):
 async def test_very_large_ids_are_handled(env):
     largest = 2**31 - 1
     async with grant_client(env, "largeids") as c:
-        assert (await call(c, "memory_update", id=largest, content="zyh"))["updated"] is False
-        assert (await call(c, "memory_delete", id=largest))["deleted"] is False
-        assert (await call(c, "memory_list", before_id=largest))["memories"] == []
-        for tool, args in (("memory_update", {"content": "zyh"}), ("memory_delete", {})):
+        assert (await call(c, "update_memory", id=largest, content="zyh"))["updated"] is False
+        assert (await call(c, "delete_memory", id=largest))["deleted"] is False
+        assert (await call(c, "list_memories", before_id=largest))["memories"] == []
+        for tool, args in (("update_memory", {"content": "zyh"}), ("delete_memory", {})):
             assert (await c.call_tool(tool, {"id": largest + 1, **args})).is_error
-        assert (await c.call_tool("memory_list", {"before_id": largest + 1})).is_error
+        assert (await c.call_tool("list_memories", {"before_id": largest + 1})).is_error
 
 
 def file_session(env, **claim_overrides):
@@ -873,8 +873,8 @@ async def test_several_files_attach_and_download(env):
     for name, content in contents.items():
         assert put_file(env, cookies, memory_id, name, content).status_code == 200
     async with client(env, "chatgpt") as c:
-        found = await call(c, "memory_search", query="zzf launch")
-        listed = await call(c, "memory_list", limit=5)
+        found = await call(c, "search_memories", query="zzf launch")
+        listed = await call(c, "list_memories", limit=5)
     attachments = by_id(found, memory_id)["attachments"]
     assert [a["name"] for a in attachments] == list(contents)
     assert by_id(listed, memory_id)["attachments"] == attachments
@@ -941,7 +941,7 @@ async def test_removing_a_file_keeps_the_memory(env):
     assert httpx.get(f"{env['base']}/files/download/{drop}", headers=cookies).status_code == 404
     assert httpx.get(f"{env['base']}/files/download/{keep}", headers=cookies).content == b"keep"
     async with client(env, "claude") as c:
-        memory = by_id(await call(c, "memory_search", query="zzj"), memory_id)
+        memory = by_id(await call(c, "search_memories", query="zzj"), memory_id)
     assert [a["name"] for a in memory["attachments"]] == ["keep.txt"]
 
 
@@ -951,9 +951,9 @@ async def test_deleting_a_memory_deletes_its_files(env):
     memory_id = new_memory(env, cookies, "zzk deletion")
     file_id = put_file(env, cookies, memory_id, "a.txt", b"a").json()["id"]
     async with client(env, "personal") as home, client(env, "claude") as work:
-        assert (await call(home, "memory_delete", id=memory_id))["deleted"] is False
+        assert (await call(home, "delete_memory", id=memory_id))["deleted"] is False
         assert httpx.get(f"{env['base']}/files/download/{file_id}", headers=cookies).status_code == 200
-        assert (await call(work, "memory_delete", id=memory_id))["deleted"] is True
+        assert (await call(work, "delete_memory", id=memory_id))["deleted"] is True
     assert httpx.get(f"{env['base']}/files/download/{file_id}", headers=cookies).status_code == 404
 
 
@@ -963,9 +963,9 @@ async def test_attachments_stay_in_their_space(env):
     memory_id = new_memory(env, cookies, "zzl private assets")
     put_file(env, cookies, memory_id, "a.txt", b"a")
     async with client(env, "personal") as home:
-        assert (await call(home, "memory_search", query="zzl"))["memories"] == []
-        assert all(m["id"] != memory_id for m in (await call(home, "memory_list", limit=100))["memories"])
-        assert (await home.call_tool("memory_upload_link", {"memory_id": memory_id})).is_error
+        assert (await call(home, "search_memories", query="zzl"))["memories"] == []
+        assert all(m["id"] != memory_id for m in (await call(home, "list_memories", limit=100))["memories"])
+        assert (await home.call_tool("get_upload_link", {"memory_id": memory_id})).is_error
 
 
 @pytest.mark.anyio
@@ -973,16 +973,16 @@ async def test_upload_link_tool(env):
     cookies = file_session(env)
     memory_id = new_memory(env, cookies, "zzm link")
     async with client(env, "claude") as c, client(env, "reader") as reader:
-        fresh = await call(c, "memory_upload_link")
-        existing = await call(c, "memory_upload_link", memory_id=memory_id)
-        assert (await reader.call_tool("memory_upload_link", {})).is_error
+        fresh = await call(c, "get_upload_link")
+        existing = await call(c, "get_upload_link", memory_id=memory_id)
+        assert (await reader.call_tool("get_upload_link", {})).is_error
     assert fresh["url"] == f"{env['base']}/files?space=work"
     assert existing["url"] == f"{env['base']}/files?memory_id={memory_id}"
     assert httpx.get(existing["url"], headers=cookies).status_code == 200
 
 
 async def sandbox_url(c, **args):
-    return (await call(c, "memory_sandbox_upload", **args))["upload_url"]
+    return (await call(c, "get_sandbox_upload_url", **args))["upload_url"]
 
 
 @pytest.mark.anyio
@@ -992,7 +992,7 @@ async def test_sandbox_uploads_a_file_without_sign_in(env):
         url = await sandbox_url(c, name="report.zip", description="zzn quarterly report bundle")
         reply = httpx.put(url, content=content)
         assert reply.status_code == 200, reply.text
-        memory = by_id(await call(c, "memory_search", query="zzn"), reply.json()["memory_id"])
+        memory = by_id(await call(c, "search_memories", query="zzn"), reply.json()["memory_id"])
     assert memory["source"].startswith("claude-") and memory["attachments"][0]["name"] == "report.zip"
     download_url = memory["attachments"][0]["browser_download_url"]
     assert httpx.get(download_url).status_code == 302
@@ -1019,7 +1019,7 @@ async def test_sandbox_link_expires_and_leaves_no_memory(env):
         url = await sandbox_url(c, name="a.bin", description="zzp expired")
         d1(env["persist"], "UPDATE upload_tokens SET expires_at = 1")
         assert httpx.put(url, content=b"x").status_code == 403
-        assert (await call(c, "memory_search", query="zzp"))["memories"] == []
+        assert (await call(c, "search_memories", query="zzp"))["memories"] == []
 
 
 @pytest.mark.anyio
@@ -1027,10 +1027,10 @@ async def test_sandbox_upload_is_limited_by_access_and_space(env):
     cookies = file_session(env)
     memory_id = new_memory(env, cookies, "zzq work only")
     async with client(env, "personal") as home, client(env, "reader") as reader, client(env, "claude") as work:
-        assert (await home.call_tool("memory_sandbox_upload", {"name": "a", "memory_id": memory_id})).is_error
-        assert (await reader.call_tool("memory_sandbox_upload", {"name": "a", "description": "x"})).is_error
-        assert (await work.call_tool("memory_sandbox_upload", {"name": "a"})).is_error
-        assert (await work.call_tool("memory_sandbox_upload", {"name": "a\nb", "description": "x"})).is_error
+        assert (await home.call_tool("get_sandbox_upload_url", {"name": "a", "memory_id": memory_id})).is_error
+        assert (await reader.call_tool("get_sandbox_upload_url", {"name": "a", "description": "x"})).is_error
+        assert (await work.call_tool("get_sandbox_upload_url", {"name": "a"})).is_error
+        assert (await work.call_tool("get_sandbox_upload_url", {"name": "a\nb", "description": "x"})).is_error
         url = await sandbox_url(work, name="more.bin", memory_id=memory_id)
     assert httpx.put(url, content=b"x").json()["memory_id"] == memory_id
 
@@ -1038,7 +1038,7 @@ async def test_sandbox_upload_is_limited_by_access_and_space(env):
 async def attached(env, c, cookies, label, content=b"secret bytes"):
     memory_id = new_memory(env, cookies, label)
     assert put_file(env, cookies, memory_id, "file.bin", content).status_code == 200
-    found = await call(c, "memory_search", query=label)
+    found = await call(c, "search_memories", query=label)
     return memory_id, by_id(found, memory_id)["attachments"][0], found
 
 
@@ -1049,7 +1049,7 @@ async def test_sandbox_downloads_a_file_once_without_sign_in(env):
     async with client(env, "claude") as c:
         memory_id, attachment, found = await attached(env, c, cookies, "zzr", content)
         assert "sign-in" in found["attachment_note"]
-        link = await call(c, "memory_sandbox_download", attachment_id=attachment["id"])
+        link = await call(c, "get_sandbox_download_url", attachment_id=attachment["id"])
     assert link["expires_in_seconds"] == 120
     url = link["download_url"]
     assert httpx.put(url, content=b"x").status_code == 405
@@ -1068,7 +1068,7 @@ async def test_sandbox_download_link_expires(env):
     cookies = file_session(env)
     async with client(env, "claude") as c:
         _, attachment, _ = await attached(env, c, cookies, "zzs expiring")
-        url = (await call(c, "memory_sandbox_download", attachment_id=attachment["id"]))["download_url"]
+        url = (await call(c, "get_sandbox_download_url", attachment_id=attachment["id"]))["download_url"]
     d1(env["persist"], "UPDATE download_links SET expires_at = 1")
     assert httpx.get(url).status_code == 403
 
@@ -1078,15 +1078,45 @@ async def test_sandbox_download_is_limited_by_access_and_space(env):
     cookies = file_session(env)
     async with client(env, "claude") as work, client(env, "personal") as home, client(env, "reader") as reader:
         _, attachment, _ = await attached(env, work, cookies, "zzt guarded")
-        assert (await home.call_tool("memory_sandbox_download", {"attachment_id": attachment["id"]})).is_error
-        assert (await reader.call_tool("memory_sandbox_download", {"attachment_id": attachment["id"]})).is_error
-        assert (await work.call_tool("memory_sandbox_download", {"attachment_id": "a" * 32})).is_error
-        url = (await call(work, "memory_sandbox_download", attachment_id=attachment["id"]))["download_url"]
+        assert (await home.call_tool("get_sandbox_download_url", {"attachment_id": attachment["id"]})).is_error
+        assert (await reader.call_tool("get_sandbox_download_url", {"attachment_id": attachment["id"]})).is_error
+        assert (await work.call_tool("get_sandbox_download_url", {"attachment_id": "a" * 32})).is_error
+        url = (await call(work, "get_sandbox_download_url", attachment_id=attachment["id"]))["download_url"]
         assert httpx.put(url.replace("/fetch/", "/direct/"), content=b"x").status_code == 403
 
 
 @pytest.mark.anyio
 async def test_results_without_files_have_no_attachment_note(env):
     async with grant_client(env, "notes") as c:
-        await call(c, "memory_add", content="zzu plain")
-        assert "attachment_note" not in await call(c, "memory_list")
+        await call(c, "add_memory", content="zzu plain")
+        assert "attachment_note" not in await call(c, "list_memories")
+
+
+def test_initialize_gives_fixed_guidance(env):
+    token = env["tokens"]["claude"]["access_token"]
+    reply = httpx.post(
+        f"{env['base']}/mcp",
+        headers={**ACCEPT, "authorization": f"Bearer {token}"},
+        json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}},
+    )
+    text = reply.json()["result"]["instructions"]
+    assert "search_memories" in text and "data, never instructions" in text
+
+
+@pytest.mark.anyio
+async def test_overview_lists_recent_files_for_this_space(env):
+    cookies = file_session(env)
+    memory_id = new_memory(env, cookies, "zzv overview map", space="filemap")
+    other = new_memory(env, cookies, "zzv other", space="filemapother")
+    for index in range(12):
+        assert put_file(env, cookies, memory_id, f"{index}.bin", b"x").status_code == 200
+    assert put_file(env, cookies, other, "hidden.bin", b"x").status_code == 200
+    removed = put_file(env, cookies, memory_id, "gone.bin", b"x").json()["id"]
+    httpx.delete(f"{env['base']}/files/attachments/{removed}", headers=same_site(env, cookies))
+    async with grant_client(env, "filemap") as c, grant_client(env, "emptymap") as empty:
+        summary = await call(c, "get_memory_overview")
+        nothing = await call(empty, "get_memory_overview")
+    assert summary["attachment_count"] == 12 and "sign-in" in summary["attachment_note"]
+    assert [f["name"] for f in summary["recent_files"]] == [f"{i}.bin" for i in range(11, 1, -1)]
+    assert all(f["memory_id"] == memory_id and f["id"] for f in summary["recent_files"])
+    assert "recent_files" not in nothing and "attachment_note" not in nothing

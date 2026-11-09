@@ -40,15 +40,14 @@ services. If you change how they are called, say so in your PR and check against
 
 ## Design
 
-memem is layered, as the README roadmap shows: Sources (chats and files), then Memories, then wiki pages, then the
-pinned overview. Keep these properties as layers are added:
+memem is a memory service, layered as the README roadmap shows: Files, then Memories, then wiki pages, then the pinned
+overview. Keep these properties as layers are added:
 
-- Sources are raw and never rewritten. Anything above them is derived and can be corrected.
+- Attached files are stored whole and never rewritten. Memories are derived notes and can be corrected.
 - The space is the access boundary for every layer.
 - Keep the pinned overview small. It is limited by `MAX_PINNED_CHARS`, because every chat reads it.
 - Tool descriptions state what memory is for, and only hold firm rules for consent, secrets and untrusted content.
-- Tools are named by layer: `memory_*` now, and `context_*` for chats and files. There is no `context_update`, since
-  sources are never rewritten.
+- Tools use verb-first names that say what they act on, like `search_memories`. Avoid bare names like `search`.
 - Memory vectors use the id prefix `m:`. Give any new kind of searchable content its own prefix.
 
 ## Rules that protect users

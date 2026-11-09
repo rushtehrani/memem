@@ -1,8 +1,8 @@
 # memem
 
 One small memory server you can attach to Claude, ChatGPT and Gemini.
-It speaks MCP and exposes nine tools: `memory_overview`, `memory_search`, `memory_list`, `memory_add`, `memory_update`, `memory_delete`,
-`memory_upload_link`, `memory_sandbox_upload` and `memory_sandbox_download`.
+It speaks MCP and exposes nine tools: `get_memory_overview`, `search_memories`, `list_memories`, `add_memory`, `update_memory`, `delete_memory`,
+`get_upload_link`, `get_sandbox_upload_url` and `get_sandbox_download_url`.
 
 It runs as a Cloudflare Worker in Python, with a D1 database and R2 for attached files. Needs [uv](https://docs.astral.sh/uv/),
 Node (for `npx wrangler`) and a Cloudflare account. The Workers free plan is enough to start.
@@ -52,7 +52,7 @@ The app opens an approval page, where you pick a memory space, optionally choose
 | Gemini (web) | Settings > Connected Apps > Custom apps > Add a custom app, then paste the address | Google's help page describes no per-chat switch, so consider a read-only connection or its own space. Type `@` to direct a prompt to it |
 
 Plan limits apply and change over time. ChatGPT may limit write tools on some plans, in which case only the read tools
-(`memory_overview`, `memory_search` and `memory_list`) may work that work there. Google limits custom apps in the Gemini app to personal accounts in
+(`get_memory_overview`, `search_memories` and `list_memories`) may work that work there. Google limits custom apps in the Gemini app to personal accounts in
 the US with Keep Activity on. Other developers have reported Gemini's sign-in failing on Google's side.
 
 ## Saving files
@@ -63,7 +63,7 @@ Files are attached to memories, so assistants can find them through memory searc
   link for that one file. Upload links expire in 10 minutes, and download links in 2 minutes.
 - **Manual.** Ask for an upload link or a file's link, or open `/files` on your Worker, and sign in.
 
-Keep approval on for `memory_sandbox_download`, because text hidden in a memory or document could try to get an
+Keep approval on for `get_sandbox_download_url`, because text hidden in a memory or document could try to get an
 assistant to fetch a file and send it elsewhere. Each memory's page on `/files` shows which connection requested each file.
 
 | App | Automatic transfer |
@@ -79,7 +79,7 @@ settings.
 
 - A chat without the connector turned on has no access at all.
 - A connection reaches exactly one space, chosen on the approval page. Reconnect to change it.
-- Read-only connections get `memory_overview`, `memory_search` and `memory_list` only.
+- Read-only connections get `get_memory_overview`, `search_memories` and `list_memories` only.
 
 ```bash
 uv run memem list
@@ -112,32 +112,32 @@ Known limits of this first version:
 - **The model provider sees what it recalls.** Don't store secrets, and keep sensitive spaces away from
   providers you don't want reading them.
 
-- **Search works best in English.** `memory_search` combines keywords with meaning search from Workers AI and Vectorize.
+- **Search works best in English.** `search_memories` combines keywords with meaning search from Workers AI and Vectorize.
   New memories can take a little while to become searchable by meaning, but keywords find them right away. If
   saving a vector fails, that memory is only findable by keyword.
 
 ## Roadmap
 
-memem is designed as layers, informed by Anthropic's
-[components of agent memory](https://www.anthropic.com/research/components-of-agent-memory). Sources are the raw record,
-and each layer above is derived from the ones below, so consolidation can rewrite anything except Sources.
+memem is a memory service, designed as layers and informed by Anthropic's
+[components of agent memory](https://www.anthropic.com/research/components-of-agent-memory). Each layer is built from the
+ones below it, and dreaming tidies them in the background.
 
 ```text
 Pinned overview   small, read at the start of a chat
 Wiki pages        linked summaries across many memories (later)
 Memories          notes that can be searched, browsed and revised
-Sources           chats and files: raw, never rewritten
+Files             attached to memories, stored whole
 ```
 
 ### Pinned overview
 
-- [x] `memory_overview` tool that returns pinned notes and a memory count
+- [x] `get_memory_overview` tool that returns pinned notes and a memory count
 - [x] Pin and unpin memories, with a size budget for each space
 - [x] Tool descriptions ask assistants to read memory first
 
 ### Memories
 
-- [x] `memory_search`, `memory_list`, `memory_add`, `memory_update` and `memory_delete` tools over MCP
+- [x] `search_memories`, `list_memories`, `add_memory`, `update_memory` and `delete_memory` tools over MCP
 - [x] Search by meaning and keyword, combined
 - [x] Fall back to keyword search if meaning search fails
 - [x] Revise outdated memories in place, recording which connection changed them
@@ -146,17 +146,9 @@ Sources           chats and files: raw, never rewritten
 - [ ] Keep edit history, so changes can be undone
 - [ ] Track deletions, so forgotten facts can't be recreated
 - [ ] Refuse edits that would overwrite a newer change
-- [ ] Link memories to the Sources they came from
 - [ ] Repair command to index memories whose vectors failed to save
 - [ ] Tune the relevance cutoff
 - [ ] Better meaning search for languages other than English
-
-### Sources: chat history
-
-- [x] Vector ids leave room for other kinds of content
-- [ ] Save an entire chat when asked, through `context_` tools
-- [ ] Search and read saved chats from other assistants
-- [ ] Full-text keyword search, since `LIKE` won't scale to whole transcripts
 
 ### Files
 
@@ -166,16 +158,15 @@ Files are attachments on memories. See [the design](docs/file-sharing-design.md)
 - [x] Signed-in upload and download page
 - [x] Automatic upload from a code sandbox with single-use links
 - [x] Automatic download into a code sandbox with single-use links
-- [ ] Search file names and contents
 
-### Consolidation
+### Dreaming
 
 - [ ] Guided tidy-up, where an assistant reviews a space and corrects or merges memories
-- [ ] Scheduled consolidation that checks memories against Sources, with protection against injected instructions
+- [ ] Scheduled dreaming that proposes merges, flags stale or conflicting memories, and suggests what to pin, with protection against injected instructions
 
 ### Guides and skills
 
-- [ ] `memory_guide` tool for multi-step workflows, such as tidying a space
+- [ ] `get_workflow_guide` tool for multi-step workflows, such as tidying a space
 - [ ] Optional `SKILL.md` that people can install in each app
 
 ### Wiki pages
