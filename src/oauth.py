@@ -1,7 +1,7 @@
 """OAuth 2.1 authorization server for a single owner.
 
 Clients register themselves, and the owner approves each one by signing in with the one
-allowed Google account. Redirects are limited to known assistants and loopback.
+allowed Google account. Redirects are limited to known assistants.
 """
 
 import base64
@@ -29,7 +29,9 @@ _SPACE = re.compile(r"[A-Za-z0-9_-]{1,64}")
 _VERIFIER = re.compile(r"[A-Za-z0-9._~-]{43,128}")
 _CHALLENGE = re.compile(r"[A-Za-z0-9_-]{43}")
 _CHATGPT_CALLBACK = re.compile(r"/connector/oauth/[A-Za-z0-9_-]+")
-_LOOPBACK_HOSTS = ("localhost", "127.0.0.1")
+# googleusercontent.com also serves user uploads, so only Google's OAuth relay hosts are allowed.
+_GEMINI_HOST = re.compile(r"oauth-redirect(?:-sandbox|-test)?\.googleusercontent\.com")
+_GEMINI_CALLBACK = re.compile(r"/[ar]/user_bound_custom-mcp-[0-9]+-[A-Za-z0-9_]+")
 
 _NO_STORE = {"cache-control": "no-store"}
 _PAGE_HEADERS = {
@@ -67,22 +69,9 @@ def client_kind(uri: str) -> str | None:
     if parts.scheme == "https" and parts.netloc == "chatgpt.com":
         allowed = parts.path == "/connector_platform_oauth_redirect" or _CHATGPT_CALLBACK.fullmatch(parts.path)
         return "chatgpt" if allowed else None
-    if parts.scheme == "http" and parts.hostname in _LOOPBACK_HOSTS:
-        return "local"
+    if parts.scheme == "https" and _GEMINI_HOST.fullmatch(parts.netloc):
+        return "gemini" if _GEMINI_CALLBACK.fullmatch(parts.path) else None
     return None
-
-
-def _redirect_matches(registered: str, given: str) -> bool:
-    if registered == given:
-        return True
-    # Native apps pick a new loopback port each session, so the port is ignored there.
-    a, b = urlsplit(registered), urlsplit(given)
-    return (
-        client_kind(given) == "local"
-        and a.scheme == b.scheme
-        and a.hostname == b.hostname
-        and a.path == b.path
-    )
 
 
 def resource_metadata(origin: str) -> Response:
@@ -156,7 +145,7 @@ async def _validate(params: dict, store, origin: str) -> str | None:
     if uris is None:
         return "Unknown client."
     given = params.get("redirect_uri", "")
-    if not client_kind(given) or not any(_redirect_matches(u, given) for u in uris):
+    if not client_kind(given) or given not in uris:
         return "This redirect address is not allowed."
     if params.get("response_type", "code") != "code":
         return "Unsupported response type."
@@ -170,13 +159,7 @@ async def _validate(params: dict, store, origin: str) -> str | None:
 def _page(params: dict, session: str, problem: str = "") -> str:
     e = lambda value: html.escape(value, quote=True)
     uri = params["redirect_uri"]
-    kind = client_kind(uri)
-    name = {"claude": "Claude", "chatgpt": "ChatGPT", "local": "A local app"}[kind]
-    warning = (
-        "<p class=warn>This sends access to a program on this computer. Only approve if you just started it.</p>"
-        if kind == "local"
-        else ""
-    )
+    name = {"claude": "Claude", "chatgpt": "ChatGPT", "gemini": "Gemini"}[client_kind(uri)]
     fields = ("client_id", "redirect_uri", "code_challenge", "code_challenge_method", "resource", "state")
     hidden = "".join(f'<input type=hidden name="{f}" value="{e(params.get(f, ""))}">' for f in fields)
     hidden += f'<input type=hidden name="session" value="{e(session)}">'
@@ -185,10 +168,10 @@ def _page(params: dict, session: str, problem: str = "") -> str:
 <title>Connect memem</title>
 <style>body{{font:16px system-ui;max-width:26rem;margin:3rem auto;padding:0 1rem;color:#222}}
 label{{display:block;margin:1rem 0 .25rem}}input[type=text]{{width:100%;padding:.5rem;box-sizing:border-box}}
-button{{margin-top:1.25rem;padding:.6rem 1.2rem}}.err{{color:#b00020}}.warn{{color:#8a5a00}}.check{{display:flex;gap:.5rem}}</style>
+button{{margin-top:1.25rem;padding:.6rem 1.2rem}}.err{{color:#b00020}}.check{{display:flex;gap:.5rem}}</style>
 <h1>Connect memem</h1>
 <p><strong>{name}</strong> wants access to one memory space.<br>It will return to <strong>{e(urlsplit(uri).hostname)}</strong>.</p>
-{warning}{error}
+{error}
 <form method=post>{hidden}
 <label for=space>Memory space</label><input id=space type=text name=space value="{e(params.get("space", "personal"))}" required pattern="[A-Za-z0-9_\\-]{{1,64}}">
 <label class=check><input type=checkbox name=read_only> Read-only</label>

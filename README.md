@@ -1,6 +1,6 @@
 # memem
 
-One small memory server you can attach to individual Claude, ChatGPT and Gemini CLI chats.
+One small memory server you can attach to Claude, ChatGPT and Gemini.
 It speaks MCP and exposes five tools: `overview`, `recall`, `remember`, `update` and `forget`.
 
 It runs as a Cloudflare Worker in Python, with a D1 database. Needs [uv](https://docs.astral.sh/uv/),
@@ -47,23 +47,11 @@ The app opens an approval page, where you pick a memory space, optionally choose
 | --- | --- | --- |
 | Claude (web, desktop) | Settings > Connectors > Add custom connector, paste the address and leave the OAuth fields empty | Turn it on per chat from the **+** menu |
 | ChatGPT | Enable Developer Mode in settings, then add a connector with the address and **OAuth** | Turn it on in each chat where you want it |
-| Claude Code | `claude mcp add --transport http memem https://memem.YOUR-SUBDOMAIN.workers.dev/mcp`, then authenticate from `/mcp` | Applies to the current project only by default |
-| Gemini CLI | Use a static token from `uv run memem connect gemini --space personal` with the config below in `.gemini/settings.json` | Applies to that project only |
+| Gemini (web) | Settings > Connected Apps > Custom apps > Add a custom app, then paste the address | Google's help page describes no per-chat switch, so consider a read-only connection or its own space. Type `@` to direct a prompt to it |
 
 Plan limits apply and change over time. ChatGPT may limit write tools on some plans, in which case `overview` and `recall`
-may be the only tools that work there. The consumer Gemini app is not covered: this was built without
-confirming that it can add custom MCP servers, so Gemini CLI is the supported route.
-
-```json
-{
-  "mcpServers": {
-    "memem": {
-      "httpUrl": "https://memem.YOUR-SUBDOMAIN.workers.dev/mcp",
-      "headers": { "Authorization": "Bearer $MEMEM_TOKEN" }
-    }
-  }
-}
-```
+may be the only tools that work there. Google limits custom apps in the Gemini app to personal accounts in
+the US with Keep Activity on. Other developers have reported Gemini's sign-in failing on Google's side.
 
 ## Choosing what each chat can see
 
@@ -81,10 +69,10 @@ Revoking takes effect on the next request.
 ## Security
 
 - Apps sign in with OAuth 2.1 and PKCE. Access tokens last an hour, and refresh tokens rotate on each use.
-- New connections need a sign-in with the one allowed Google account, and redirects are limited to Claude, ChatGPT and local apps.
+- New connections need a sign-in with the one allowed Google account, and redirects are limited to Claude, ChatGPT and Gemini.
 - All tokens are 256-bit random values, stored only as SHA-256 hashes, and travel only in the `Authorization` header.
 - The space and write permission come from the token. Tools cannot choose another space.
-- `memem connect` makes a static token for CLIs on your machine. Only its hash is sent to D1.
+- `memem connect` makes a static token for development and testing. Only its hash is sent to D1.
 - Memories are stored in Cloudflare D1, so Cloudflare hosts their contents. Check its current encryption
   documentation if that matters for what you store.
 - The Worker does not log URLs and `wrangler.jsonc` keeps Workers Logs off. Turning them on, or running
@@ -165,7 +153,6 @@ Sources           chats and files: raw, never rewritten
 - [x] Immediate revocation
 - [x] OAuth 2.1 sign-in, with no token to copy
 - [x] Google sign-in limited to one account
-- [x] Static tokens for CLIs
 
 ### Clients and project
 
@@ -173,8 +160,9 @@ Sources           chats and files: raw, never rewritten
 - [x] Connected and saved memories from Claude web
 - [x] Connected and saved memories from ChatGPT
 - [x] End-to-end test suite
-- [ ] Try the documented Claude Code and Gemini CLI setups on the live service
-- [ ] Find out whether the consumer Gemini app can add custom MCP servers
+- [ ] Later: support Claude Code, Gemini CLI and other coding agents
+- [x] Connected from Gemini web
+- [ ] Confirm Gemini web can save and recall memories on the live service
 - [ ] Run tests in CI
 - [ ] Let forks deploy without editing the database id in `wrangler.jsonc`
 

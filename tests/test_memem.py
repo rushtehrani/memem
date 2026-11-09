@@ -25,9 +25,10 @@ from mcp.shared.auth import OAuthClientMetadata
 GOOGLE_CLIENT_ID = "test-google-id"
 GOOGLE_CLIENT_SECRET = "test-google-secret"
 OWNER_EMAIL = "owner@example.com"
-LOCAL_REDIRECT = "http://127.0.0.1:9999/callback"
 CLAUDE_REDIRECT = "https://claude.ai/api/mcp/auth_callback"
 CHATGPT_REDIRECT = "https://chatgpt.com/connector_platform_oauth_redirect"
+GEMINI_PATH = "user_bound_custom-mcp-123456-memem_example_workers_dev"
+GEMINI_REDIRECT = f"https://oauth-redirect.googleusercontent.com/r/{GEMINI_PATH}"
 TOOLS_LIST = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
 ACCEPT = {"accept": "application/json, text/event-stream"}
 WRANGLER_ENV = {**os.environ, "CI": "1", "WRANGLER_SEND_METRICS": "false"}
@@ -47,7 +48,7 @@ def d1(persist, sql):
     subprocess.run([*command, "--command", sql], check=True, capture_output=True, env=WRANGLER_ENV, stdin=subprocess.DEVNULL)
 
 
-def register(base, redirect=LOCAL_REDIRECT):
+def register(base, redirect=CLAUDE_REDIRECT):
     return httpx.post(f"{base}/oauth/register", json={"redirect_uris": [redirect], "client_name": "test"})
 
 
@@ -98,14 +99,14 @@ def sign_in(base, authorize_url, space="work", read_only=False, session_override
     return callback(base, {"state": google["state"], "code": code}, session_override or session)
 
 
-def authorize_url(base, client_id, challenge, redirect=LOCAL_REDIRECT):
+def authorize_url(base, client_id, challenge, redirect=CLAUDE_REDIRECT):
     return f"{base}/oauth/authorize?" + urlencode({
         "client_id": client_id, "redirect_uri": redirect, "response_type": "code", "code_challenge": challenge,
         "code_challenge_method": "S256", "resource": f"{base}/mcp", "state": "xyz",
     })
 
 
-def approve(base, client_id, challenge, redirect=LOCAL_REDIRECT, **kwargs):
+def approve(base, client_id, challenge, redirect=CLAUDE_REDIRECT, **kwargs):
     return sign_in(base, authorize_url(base, client_id, challenge, redirect), **kwargs)
 
 
@@ -113,7 +114,7 @@ def code_from(response):
     return parse_qs(urlsplit(response.headers["location"]).query)["code"][0]
 
 
-def exchange(base, client_id, code, verifier, redirect=LOCAL_REDIRECT):
+def exchange(base, client_id, code, verifier, redirect=CLAUDE_REDIRECT):
     return httpx.post(
         f"{base}/oauth/token",
         data={
@@ -288,7 +289,8 @@ def test_tokens_in_urls_are_gone(env):
 
 
 @pytest.mark.parametrize("redirect", [
-    CLAUDE_REDIRECT, CHATGPT_REDIRECT, "https://chatgpt.com/connector/oauth/abc123", "http://localhost:3118/callback",
+    CLAUDE_REDIRECT, CHATGPT_REDIRECT, "https://chatgpt.com/connector/oauth/abc123",
+    GEMINI_REDIRECT, f"https://oauth-redirect-sandbox.googleusercontent.com/a/{GEMINI_PATH}",
 ])
 def test_known_redirects_register(env, redirect):
     assert register(env["base"], redirect).status_code == 201
@@ -296,6 +298,16 @@ def test_known_redirects_register(env, redirect):
 
 @pytest.mark.parametrize("redirect", [
     "https://evil.example/callback",
+    "http://localhost:3118/callback",
+    "http://127.0.0.1:9999/callback",
+    f"https://evil.googleusercontent.com/r/{GEMINI_PATH}",
+    f"https://lh3.googleusercontent.com/r/{GEMINI_PATH}",
+    f"https://oauth-redirect-evil.googleusercontent.com/r/{GEMINI_PATH}",
+    f"https://oauth-redirect.googleusercontent.com.evil.example/r/{GEMINI_PATH}",
+    "https://oauth-redirect.googleusercontent.com/evil",
+    "https://oauth-redirect.googleusercontent.com/r/abc",
+    f"https://oauth-redirect.googleusercontent.com/r/a/../../{GEMINI_PATH}",
+    f"http://oauth-redirect.googleusercontent.com/r/{GEMINI_PATH}",
     "https://claude.ai.evil.example/api/mcp/auth_callback",
     "https://claude.ai/other",
     "http://claude.ai/api/mcp/auth_callback",
@@ -326,6 +338,29 @@ def test_authorize_refuses_unregistered_redirect(env):
     _, challenge = pkce()
     response = approve(base, client_id, challenge, redirect=CHATGPT_REDIRECT)
     assert response.status_code == 400 and "location" not in response.headers
+
+
+def test_gemini_signs_in_with_several_redirects_and_a_long_state(env):
+    base = env["base"]
+    # The six addresses the real app registers.
+    uris = [
+        f"https://{host}.googleusercontent.com/{kind}/{GEMINI_PATH}"
+        for kind in "ra"
+        for host in ("oauth-redirect", "oauth-redirect-sandbox", "oauth-redirect-test")
+    ]
+    registered = httpx.post(f"{base}/oauth/register", json={"redirect_uris": uris, "client_name": "gemini"})
+    assert registered.status_code == 201
+    verifier, challenge = pkce()
+    long_state = "s" * 1_400
+    target = authorize_url(base, registered.json()["client_id"], challenge, uris[0]).replace("state=xyz", f"state={long_state}")
+    page, _, _ = open_consent(target)
+    assert "Gemini" in page.text
+    response = sign_in(base, target, space="geminicheck")
+    assert response.status_code == 302
+    assert response.headers["location"].startswith(uris[0] + "?")
+    assert parse_qs(urlsplit(response.headers["location"]).query)["state"] == [long_state]
+    tokens = exchange(base, registered.json()["client_id"], code_from(response), verifier, uris[0])
+    assert tokens.status_code == 200
 
 
 def start(env):
@@ -399,13 +434,6 @@ def test_redirect_includes_state_and_issuer(env):
     assert query["state"] == ["xyz"] and query["iss"] == [base]
 
 
-def test_loopback_port_may_change(env):
-    base = env["base"]
-    client_id = register(base, "http://127.0.0.1/callback").json()["client_id"]
-    _, challenge = pkce()
-    assert approve(base, client_id, challenge, redirect="http://127.0.0.1:4567/callback").status_code == 302
-
-
 def test_code_needs_correct_verifier_and_works_once(env):
     base = env["base"]
     client_id = register(base).json()["client_id"]
@@ -446,7 +474,7 @@ async def test_memory_shared_between_assistants(env, mode):
         saved = await call(a, "remember", content=f"Project Falcon ships in March {mode}")
         found = await call(b, "recall", query=f"falcon {mode}")
     assert found["memories"][0]["id"] == saved["id"]
-    assert found["memories"][0]["source"].startswith("local-")
+    assert found["memories"][0]["source"].startswith("claude-")
 
 
 def test_static_bearer_connection_and_revoke(env):
@@ -568,7 +596,7 @@ async def test_official_sdk_oauth_client_completes_the_flow(env):
     provider = OAuthClientProvider(
         server_url=f"{base}/mcp",
         client_metadata=OAuthClientMetadata(
-            redirect_uris=[LOCAL_REDIRECT],
+            redirect_uris=[CLAUDE_REDIRECT],
             client_name="sdk",
             grant_types=["authorization_code", "refresh_token"],
             response_types=["code"],
