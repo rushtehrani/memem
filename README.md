@@ -143,9 +143,12 @@ Sources           chats and files: raw, never rewritten
 - [x] Revise outdated memories in place, recording which connection changed them
 - [x] Browse a whole space, page by page
 - [x] Tool descriptions state the purpose of memory rather than strict rules
+- [ ] Keep edit history, so changes can be undone
+- [ ] Track deletions, so forgotten facts can't be recreated
+- [ ] Refuse edits that would overwrite a newer change
 - [ ] Link memories to the Sources they came from
 - [ ] Repair command to index memories whose vectors failed to save
-- [ ] Tune the relevance cutoff on real memories (0.52 was set from a small sample)
+- [ ] Tune the relevance cutoff
 - [ ] Better meaning search for languages other than English
 
 ### Sources: chat history
@@ -161,8 +164,6 @@ Files are attachments on memories. See [the design](docs/file-sharing-design.md)
 
 - [x] Attach several files of any type to a memory, stored in R2
 - [x] Signed-in upload and download page
-- [x] Upload from ChatGPT, and download into ChatGPT and Claude, automatically
-- [ ] Confirm upload from Claude, and the manual page from Gemini
 - [x] Automatic upload from a code sandbox with single-use links
 - [x] Automatic download into a code sandbox with single-use links
 - [ ] Search file names and contents
@@ -171,6 +172,11 @@ Files are attachments on memories. See [the design](docs/file-sharing-design.md)
 
 - [ ] Guided tidy-up, where an assistant reviews a space and corrects or merges memories
 - [ ] Scheduled consolidation that checks memories against Sources, with protection against injected instructions
+
+### Guides and skills
+
+- [ ] `memory_guide` tool for multi-step workflows, such as tidying a space
+- [ ] Optional `SKILL.md` that people can install in each app
 
 ### Wiki pages
 
@@ -186,14 +192,9 @@ Files are attachments on memories. See [the design](docs/file-sharing-design.md)
 
 ### Clients and project
 
-- [x] Deployed on Cloudflare Workers with D1, Workers AI and Vectorize
-- [x] Connected and saved memories from Claude web
-- [x] Connected and saved memories from ChatGPT
-- [x] End-to-end test suite
-- [ ] Later: support Claude Code, Gemini CLI and other coding agents
-- [x] Connected from Gemini web
-- [ ] Confirm Gemini web can save and recall memories on the live service
-- [ ] Run tests in CI
+- [x] Runs on Cloudflare Workers with D1, R2, Workers AI and Vectorize
+- [x] Support for Claude, ChatGPT and Gemini web apps
+- [ ] Support for Claude Code, Gemini CLI and other coding agents
 - [ ] Let forks deploy without editing the database id in `wrangler.jsonc`
 
 ## Contributing
