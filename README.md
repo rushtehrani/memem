@@ -47,15 +47,15 @@ The app opens an approval page, where you pick a memory space, optionally choose
 
 | Client | How to add | How to limit it |
 | --- | --- | --- |
-| Claude (web, desktop) | Settings > Connectors > Add custom connector, paste the address and leave the OAuth fields empty | Turn it on per chat from the **+** menu |
-| ChatGPT | Enable Developer Mode in settings, then add a connector with the address and **OAuth** | Turn it on in each chat where you want it |
-| Gemini (web) | Settings > Connected Apps > Custom apps > Add a custom app, then paste the address | Google's help page describes no per-chat switch, so consider a read-only connection or its own space. Type `@` to direct a prompt to it |
+| Claude and Claude Code | Settings > Connectors > Add custom connector, paste the address and leave the OAuth fields empty | Turn it on per chat from the **+** menu. Claude Code reaches the same space in any project |
+| ChatGPT and Codex | Enable Developer Mode in settings, then add a connector with the address and **OAuth** | Turn it on in each chat where you want it |
+| Gemini | Settings > Connected Apps > Custom apps > Add a custom app, then paste the address | Google's help page describes no per-chat switch, so consider a read-only connection or its own space. Type `@` to direct a prompt to it |
 
 Plan limits apply and change over time. ChatGPT may limit write tools on some plans, in which case only the read tools
-(`get_memory_overview`, `search_memories` and `list_memories`) may work that work there. Google limits custom apps in the Gemini app to personal accounts in
+(`get_memory_overview`, `search_memories` and `list_memories`) may work there. Google limits custom apps in the Gemini app to personal accounts in
 the US with Keep Activity on. Other developers have reported Gemini's sign-in failing on Google's side.
 
-## Saving files
+## Saving and retrieving files
 
 Files are attached to memories, so assistants can find them through memory search. There are two ways to move a file:
 
@@ -184,8 +184,8 @@ Files are attachments on memories. See [the design](docs/file-sharing-design.md)
 ### Clients and project
 
 - [x] Runs on Cloudflare Workers with D1, R2, Workers AI and Vectorize
-- [x] Support for Claude, ChatGPT and Gemini web apps
-- [ ] Support for Claude Code, Gemini CLI and other coding agents
+- [x] Support for Claude, Claude Code, ChatGPT, Codex and Gemini
+- [ ] Support for Gemini CLI and other coding agents
 - [ ] Let forks deploy without editing the database id in `wrangler.jsonc`
 
 ## Contributing
