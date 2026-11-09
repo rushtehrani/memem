@@ -1,7 +1,7 @@
 # memem
 
 One small memory server you can attach to Claude, ChatGPT and Gemini.
-It speaks MCP and exposes five tools: `overview`, `recall`, `remember`, `update` and `forget`.
+It speaks MCP and exposes six tools: `memory_overview`, `memory_search`, `memory_list`, `memory_add`, `memory_update` and `memory_delete`.
 
 It runs as a Cloudflare Worker in Python, with a D1 database. Needs [uv](https://docs.astral.sh/uv/),
 Node (for `npx wrangler`) and a Cloudflare account. The Workers free plan is enough to start.
@@ -49,15 +49,15 @@ The app opens an approval page, where you pick a memory space, optionally choose
 | ChatGPT | Enable Developer Mode in settings, then add a connector with the address and **OAuth** | Turn it on in each chat where you want it |
 | Gemini (web) | Settings > Connected Apps > Custom apps > Add a custom app, then paste the address | Google's help page describes no per-chat switch, so consider a read-only connection or its own space. Type `@` to direct a prompt to it |
 
-Plan limits apply and change over time. ChatGPT may limit write tools on some plans, in which case `overview` and `recall`
-may be the only tools that work there. Google limits custom apps in the Gemini app to personal accounts in
+Plan limits apply and change over time. ChatGPT may limit write tools on some plans, in which case only the read tools
+(`memory_overview`, `memory_search` and `memory_list`) may work that work there. Google limits custom apps in the Gemini app to personal accounts in
 the US with Keep Activity on. Other developers have reported Gemini's sign-in failing on Google's side.
 
 ## Choosing what each chat can see
 
 - A chat without the connector turned on has no access at all.
 - A connection reaches exactly one space, chosen on the approval page. Reconnect to change it.
-- Read-only connections get `overview` and `recall` only.
+- Read-only connections get `memory_overview`, `memory_search` and `memory_list` only.
 
 ```bash
 uv run memem list
@@ -83,12 +83,12 @@ Known limits of this first version:
 
 - **Your Google account is the master credential.** Anyone who can sign in as it can approve a connection, so keep
   2-step verification on. memem has a single owner and no per-user accounts.
-- **Memories can carry prompt injection.** Text saved from one chat is read by another. `recall` labels results
+- **Memories can carry prompt injection.** Text saved from one chat is read by another. Search results are labeled
   as data, but that only lowers the risk. Use `--read-only` for chats that process untrusted content.
 - **The model provider sees what it recalls.** Don't store secrets, and keep sensitive spaces away from
   providers you don't want reading them.
 
-- **Search works best in English.** `recall` combines keywords with meaning search from Workers AI and Vectorize.
+- **Search works best in English.** `memory_search` combines keywords with meaning search from Workers AI and Vectorize.
   New memories can take a little while to become searchable by meaning, but keywords find them right away. If
   saving a vector fails, that memory is only findable by keyword.
 
@@ -107,13 +107,13 @@ Sources           chats and files: raw, never rewritten
 
 ### Pinned overview
 
-- [x] `overview` tool that returns pinned notes and a memory count
+- [x] `memory_overview` tool that returns pinned notes and a memory count
 - [x] Pin and unpin memories, with a size budget for each space
 - [x] Tool descriptions ask assistants to read memory first
 
 ### Memories
 
-- [x] `recall`, `remember`, `update` and `forget` tools over MCP
+- [x] `memory_search`, `memory_list`, `memory_add`, `memory_update` and `memory_delete` tools over MCP
 - [x] Search by meaning and keyword, combined
 - [x] Fall back to keyword search if meaning search fails
 - [x] Revise outdated memories in place, recording which connection changed them
@@ -127,7 +127,7 @@ Sources           chats and files: raw, never rewritten
 ### Sources: chat history
 
 - [x] Vector ids leave room for other kinds of content
-- [ ] Save an entire chat when asked
+- [ ] Save an entire chat when asked, through `context_` tools
 - [ ] Search and read saved chats from other assistants
 - [ ] Full-text keyword search, since `LIKE` won't scale to whole transcripts
 

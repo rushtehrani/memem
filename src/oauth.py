@@ -43,6 +43,33 @@ _PAGE_HEADERS = {
 }
 
 
+_HEAD = """<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
+<meta name=color-scheme content="light dark">
+<style>
+:root{--bg:#f4f1ea;--card:#fffdf9;--ink:#23211c;--muted:#6f6a5f;--line:#ddd7ca;--accent:#6022fc;--on-accent:#fff;--me:#6022fc;--mem:#3f3f3f;--err:#a3271f;--err-bg:#fbeae7}
+@media (prefers-color-scheme:dark){:root{--bg:#191814;--card:#24221d;--ink:#f0ece3;--muted:#a8a294;--line:#3b382f;--me:#a98bff;--mem:#d2cec6;--err:#f2a79f;--err-bg:#3a211e}}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:grid;place-items:center;padding:1.5rem;background:var(--bg);color:var(--ink);font:16px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
+main{width:100%;max-width:27rem;padding:2.25rem;background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:0 12px 32px -20px rgb(0 0 0/.35)}
+.brand{margin:0 0 1.75rem;font-size:1.35rem;font-weight:700;line-height:1;letter-spacing:-.02em;color:var(--mem)}
+.brand span{color:var(--me)}
+h1{margin:0 0 .5rem;font-size:1.75rem;line-height:1.2;letter-spacing:-.02em}
+.lead{margin:0;color:var(--muted)}.lead strong{color:var(--ink);font-weight:600}
+.err{margin:1.25rem 0 0;padding:.65rem .85rem;border-radius:8px;background:var(--err-bg);color:var(--err);font-size:.925rem}
+form{margin-top:1.75rem}
+label[for=space]{display:block;margin-bottom:.4rem;font-size:.925rem;font-weight:600}
+input[type=text]{width:100%;padding:.65rem .75rem;border:1px solid var(--line);border-radius:8px;background:transparent;color:inherit;font:inherit}
+.hint{margin:.4rem 0 0;color:var(--muted);font-size:.85rem}
+.check{display:flex;gap:.65rem;margin-top:1.25rem;padding:.8rem .85rem;border:1px solid var(--line);border-radius:8px;cursor:pointer}
+.check input{width:1.05rem;height:1.05rem;margin:.2rem 0 0;accent-color:var(--accent)}
+.check b{display:block;font-weight:600;font-size:.95rem}.check small{display:block;color:var(--muted);font-size:.85rem}
+button{width:100%;margin-top:1.5rem;padding:.75rem 1rem;border:0;border-radius:8px;background:var(--accent);color:var(--on-accent);font:inherit;font-weight:600;cursor:pointer}
+button:hover{filter:brightness(1.08)}
+input:focus-visible,button:focus-visible{outline:2px solid var(--me);outline-offset:2px}
+</style>
+"""
+
+
 def hash_secret(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 
@@ -164,18 +191,19 @@ def _page(params: dict, session: str, problem: str = "") -> str:
     hidden = "".join(f'<input type=hidden name="{f}" value="{e(params.get(f, ""))}">' for f in fields)
     hidden += f'<input type=hidden name="session" value="{e(session)}">'
     error = f"<p class=err>{e(problem)}</p>" if problem else ""
-    return f"""<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
-<title>Connect memem</title>
-<style>body{{font:16px system-ui;max-width:26rem;margin:3rem auto;padding:0 1rem;color:#222}}
-label{{display:block;margin:1rem 0 .25rem}}input[type=text]{{width:100%;padding:.5rem;box-sizing:border-box}}
-button{{margin-top:1.25rem;padding:.6rem 1.2rem}}.err{{color:#b00020}}.check{{display:flex;gap:.5rem}}</style>
-<h1>Connect memem</h1>
-<p><strong>{name}</strong> wants access to one memory space.<br>It will return to <strong>{e(urlsplit(uri).hostname)}</strong>.</p>
+    return f"""{_HEAD}<title>Connect memem</title>
+<main>
+<p class=brand><span>me</span>mem</p>
+<h1>Connect {name}</h1>
+<p class=lead><strong>{name}</strong> is asking for access to one memory space. After you approve, you'll return to <strong>{e(urlsplit(uri).hostname)}</strong>.</p>
 {error}
 <form method=post>{hidden}
-<label for=space>Memory space</label><input id=space type=text name=space value="{e(params.get("space", "personal"))}" required pattern="[A-Za-z0-9_\\-]{{1,64}}">
-<label class=check><input type=checkbox name=read_only> Read-only</label>
-<button type=submit>Continue with Google</button></form>"""
+<label for=space>Memory space</label>
+<input id=space type=text name=space value="{e(params.get("space", "personal"))}" required pattern="[A-Za-z0-9_\\-]{{1,64}}" autocomplete=off spellcheck=false>
+<p class=hint>Apps connected to the same space share memories.</p>
+<label class=check><input type=checkbox name=read_only><span><b>Read-only</b><small>{name} can read memories but can't change them.</small></span></label>
+<button type=submit>Continue with Google</button></form>
+</main>"""
 
 
 def _html(body: str, status: int = 200, cookie: str | None = None) -> Response:
@@ -186,7 +214,7 @@ def _html(body: str, status: int = 200, cookie: str | None = None) -> Response:
 
 
 def _message(text: str, status: int) -> Response:
-    return _html(f"<!doctype html><meta charset=utf-8><title>memem</title><p>{html.escape(text)}</p>", status)
+    return _html(f"{_HEAD}<title>memem</title><main><p class=brand><span>me</span>mem</p><p class=lead>{html.escape(text)}</p></main>", status)
 
 
 def _cookie(origin: str, value: str, max_age: int) -> str:

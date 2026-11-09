@@ -46,6 +46,8 @@ pinned overview. Keep these properties as layers are added:
 - The space is the access boundary for every layer.
 - Keep the pinned overview small. It is limited by `MAX_PINNED_CHARS`, because every chat reads it.
 - Tool descriptions state what memory is for, and only hold firm rules for consent, secrets and untrusted content.
+- Tools are named by layer: `memory_*` now, and `context_*` for chats and files. There is no `context_update`, since
+  sources are never rewritten.
 - Memory vectors use the id prefix `m:`. Give any new kind of searchable content its own prefix.
 
 ## Rules that protect users
@@ -62,9 +64,9 @@ These are the parts of the design most easily broken by accident. Each change mu
   single allowed Google account. Add a test for any new way through these checks.
 - **Test stand-ins work only on loopback.** `MEMEM_GOOGLE_TEST_BASE` and `MEMEM_SEMANTIC_TEST_BASE` must stay ignored
   unless the request origin is `127.0.0.1`.
-- **Recalled memories are untrusted.** Keep the "data, not instructions" notice on `recall` results. Text saved in one
+- **Recalled memories are untrusted.** Keep the "data, not instructions" notice on memory results. Text saved in one
   chat is read in another.
-- **Read-only connections get `overview` and `recall` only**, both in `tools/list` and when a tool is called.
+- **Read-only connections get only the read tools**, both in `tools/list` and when a tool is called.
 - **Edits record who made them.** `source` keeps the original author and `updated_by` the latest editor, both set by the
   server, so a memory's history can't be forged through a tool.
 - **Never commit secrets**, tokens or local state such as `.wrangler/` and `.dev.vars`.

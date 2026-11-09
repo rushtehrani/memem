@@ -471,8 +471,8 @@ def test_expired_access_token_is_refused(env):
 @pytest.mark.anyio
 async def test_memory_shared_between_assistants(env, mode):
     async with client(env, "claude", mode) as a, client(env, "chatgpt", mode) as b:
-        saved = await call(a, "remember", content=f"Project Falcon ships in March {mode}")
-        found = await call(b, "recall", query=f"falcon {mode}")
+        saved = await call(a, "memory_add", content=f"Project Falcon ships in March {mode}")
+        found = await call(b, "memory_search", query=f"falcon {mode}")
     assert found["memories"][0]["id"] == saved["id"]
     assert found["memories"][0]["source"].startswith("claude-")
 
@@ -491,26 +491,26 @@ def test_static_bearer_connection_and_revoke(env):
 async def test_spaces_are_isolated(env, mode):
     word = f"secretword{mode}"
     async with client(env, "claude", mode) as work, client(env, "personal", mode) as home:
-        saved = await call(work, "remember", content=word)
-        assert (await call(home, "recall", query=word))["memories"] == []
-        assert (await call(home, "forget", id=saved["id"]))["deleted"] is False
-        assert len((await call(work, "recall", query=word))["memories"]) == 1
+        saved = await call(work, "memory_add", content=word)
+        assert (await call(home, "memory_search", query=word))["memories"] == []
+        assert (await call(home, "memory_delete", id=saved["id"]))["deleted"] is False
+        assert len((await call(work, "memory_search", query=word))["memories"]) == 1
 
 
 @pytest.mark.anyio
 async def test_read_only_has_no_write_tools(env, mode):
     async with client(env, "reader", mode) as c:
-        assert [t.name for t in (await c.list_tools()).tools] == ["overview", "recall"]
-        assert (await c.call_tool("remember", {"content": "readonlyattempt"})).is_error
-        assert (await c.call_tool("update", {"id": 1, "content": "readonlyattempt"})).is_error
-        assert (await call(c, "recall", query="readonlyattempt"))["memories"] == []
+        assert [t.name for t in (await c.list_tools()).tools] == ["memory_overview", "memory_search", "memory_list"]
+        assert (await c.call_tool("memory_add", {"content": "readonlyattempt"})).is_error
+        assert (await c.call_tool("memory_update", {"id": 1, "content": "readonlyattempt"})).is_error
+        assert (await call(c, "memory_search", query="readonlyattempt"))["memories"] == []
 
 
 @pytest.mark.anyio
 async def test_invalid_arguments_are_rejected(env, mode):
     async with client(env, "claude", mode) as c:
-        assert (await c.call_tool("remember", {"content": ""})).is_error
-        assert (await c.call_tool("remember", {"content": "x" * 10_001})).is_error
+        assert (await c.call_tool("memory_add", {"content": ""})).is_error
+        assert (await c.call_tool("memory_add", {"content": "x" * 10_001})).is_error
 
 
 def test_oversized_bodies_rejected(env):
@@ -536,9 +536,9 @@ def test_no_plaintext_tokens_at_rest(env):
 @pytest.mark.anyio
 async def test_like_wildcards_are_literal(env):
     async with client(env, "personal") as c:
-        await call(c, "remember", content="discount is 50% today")
-        await call(c, "remember", content="discount is 50 dollars")
-        found = await call(c, "recall", query="50%")
+        await call(c, "memory_add", content="discount is 50% today")
+        await call(c, "memory_add", content="discount is 50 dollars")
+        found = await call(c, "memory_search", query="50%")
     assert [m["content"] for m in found["memories"]] == ["discount is 50% today"]
 
 
@@ -551,11 +551,11 @@ def test_cli_rejects_bad_input_and_duplicates(env):
 @pytest.mark.anyio
 async def test_concurrent_requests_stay_in_their_own_space(env):
     async with client(env, "claude") as work, client(env, "personal") as home:
-        await call(work, "remember", content="racemarker workside")
-        await call(home, "remember", content="racemarker homeside")
+        await call(work, "memory_add", content="racemarker workside")
+        await call(home, "memory_add", content="racemarker homeside")
 
         async def check(c, expected):
-            memories = (await call(c, "recall", query="racemarker"))["memories"]
+            memories = (await call(c, "memory_search", query="racemarker"))["memories"]
             assert [m["content"] for m in memories] == [f"racemarker {expected}"]
 
         await asyncio.gather(*(check(c, e) for _ in range(25) for c, e in ((work, "workside"), (home, "homeside"))))
@@ -608,78 +608,78 @@ async def test_official_sdk_oauth_client_completes_the_flow(env):
     )
     http = httpx2.AsyncClient(auth=provider, timeout=60)
     async with Client(streamable_http_client(f"{base}/mcp", http_client=http), mode="legacy") as c:
-        saved = await call(c, "remember", content="saved through sdk oauth")
-        found = await call(c, "recall", query="sdk oauth")
+        saved = await call(c, "memory_add", content="saved through sdk oauth")
+        found = await call(c, "memory_search", query="sdk oauth")
     assert found["memories"][0]["id"] == saved["id"]
 
 
 @pytest.mark.anyio
 async def test_recall_finds_meaning_without_shared_words(env):
     async with client(env, "claude") as c:
-        await call(c, "remember", content="I own a Honda Civic.")
-        await call(c, "remember", content="Bananas are on sale.")
-        found = await call(c, "recall", query="vehicle")
+        await call(c, "memory_add", content="I own a Honda Civic.")
+        await call(c, "memory_add", content="Bananas are on sale.")
+        found = await call(c, "memory_search", query="vehicle")
     assert [m["content"] for m in found["memories"]] == ["I own a Honda Civic."]
 
 
 @pytest.mark.anyio
 async def test_low_similarity_results_are_dropped(env):
     async with client(env, "personal") as c:
-        await call(c, "remember", content="Unrelated gardening note zzq")
-        found = await call(c, "recall", query="quantum chromodynamics")
+        await call(c, "memory_add", content="Unrelated gardening note zzq")
+        found = await call(c, "memory_search", query="quantum chromodynamics")
     assert found["memories"] == []
 
 
 @pytest.mark.anyio
 async def test_common_words_do_not_match_everything(env):
     async with client(env, "personal") as c:
-        await call(c, "remember", content="This is about the thing with it zzr")
-        found = await call(c, "recall", query="what is the kumquat")
+        await call(c, "memory_add", content="This is about the thing with it zzr")
+        found = await call(c, "memory_search", query="what is the kumquat")
     assert all("zzr" not in m["content"] for m in found["memories"])
 
 
 @pytest.mark.anyio
 async def test_matching_both_ways_ranks_first(env):
     async with client(env, "chatgpt") as c:
-        await call(c, "remember", content="The honda dealership zzs")
-        await call(c, "remember", content="My vehicle inspection zzs is due")
-        found = await call(c, "recall", query="vehicle zzs")
+        await call(c, "memory_add", content="The honda dealership zzs")
+        await call(c, "memory_add", content="My vehicle inspection zzs is due")
+        found = await call(c, "memory_search", query="vehicle zzs")
     assert found["memories"][0]["content"] == "My vehicle inspection zzs is due"
 
 
 @pytest.mark.anyio
 async def test_failed_embedding_still_saves_and_keywords_work(env):
     async with client(env, "personal") as c:
-        await call(c, "remember", content="failembed zzt saved anyway")
-        found = await call(c, "recall", query="zzt")
+        await call(c, "memory_add", content="failembed zzt saved anyway")
+        found = await call(c, "memory_search", query="zzt")
     assert [m["content"] for m in found["memories"]] == ["failembed zzt saved anyway"]
 
 
 @pytest.mark.anyio
 async def test_failed_meaning_search_falls_back_to_keywords(env):
     async with client(env, "personal") as c:
-        await call(c, "remember", content="zzu fallback note")
-        found = await call(c, "recall", query="failsearch zzu")
+        await call(c, "memory_add", content="zzu fallback note")
+        found = await call(c, "memory_search", query="failsearch zzu")
     assert [m["content"] for m in found["memories"]] == ["zzu fallback note"]
 
 
 @pytest.mark.anyio
 async def test_wrong_vector_results_cannot_cross_spaces(env):
     async with client(env, "claude") as work, client(env, "personal") as home:
-        await call(work, "remember", content="zzv private work detail")
-        found = await call(home, "recall", query="leakcheck")
+        await call(work, "memory_add", content="zzv private work detail")
+        found = await call(home, "memory_search", query="leakcheck")
     assert all("zzv" not in m["content"] for m in found["memories"])
 
 
 @pytest.mark.anyio
 async def test_forget_removes_the_vector_only_for_its_own_space(env):
     async with client(env, "claude") as work, client(env, "personal") as home:
-        saved = await call(work, "remember", content="zzw honda parking pass")
+        saved = await call(work, "memory_add", content="zzw honda parking pass")
         vector = f"m:{saved['id']}"
         assert vector in FakeGoogle.vectors
-        assert (await call(home, "forget", id=saved["id"]))["deleted"] is False
+        assert (await call(home, "memory_delete", id=saved["id"]))["deleted"] is False
         assert vector in FakeGoogle.vectors
-        assert (await call(work, "forget", id=saved["id"]))["deleted"] is True
+        assert (await call(work, "memory_delete", id=saved["id"]))["deleted"] is True
         assert vector not in FakeGoogle.vectors
 
 
@@ -690,9 +690,9 @@ def by_id(found, memory_id):
 @pytest.mark.anyio
 async def test_update_rewrites_memory_and_records_who(env):
     async with client(env, "claude") as a, client(env, "chatgpt") as b:
-        saved = await call(a, "remember", content="zya meeting is on Monday")
-        assert (await call(b, "update", id=saved["id"], content="zya meeting is on Friday"))["updated"] is True
-        memory = by_id(await call(a, "recall", query="zya"), saved["id"])
+        saved = await call(a, "memory_add", content="zya meeting is on Monday")
+        assert (await call(b, "memory_update", id=saved["id"], content="zya meeting is on Friday"))["updated"] is True
+        memory = by_id(await call(a, "memory_search", query="zya"), saved["id"])
     assert memory["content"] == "zya meeting is on Friday"
     assert memory["source"] != memory["updated_by"]
     assert memory["updated_at"]
@@ -701,30 +701,30 @@ async def test_update_rewrites_memory_and_records_who(env):
 @pytest.mark.anyio
 async def test_update_refreshes_meaning_search(env):
     async with client(env, "chatgpt") as c:
-        saved = await call(c, "remember", content="Bicycle storage zyb")
-        await call(c, "update", id=saved["id"], content="Civic storage zyb")
-        found = await call(c, "recall", query="vehicle")
+        saved = await call(c, "memory_add", content="Bicycle storage zyb")
+        await call(c, "memory_update", id=saved["id"], content="Civic storage zyb")
+        found = await call(c, "memory_search", query="vehicle")
     assert saved["id"] in [m["id"] for m in found["memories"]]
 
 
 @pytest.mark.anyio
 async def test_failed_reindex_drops_the_old_vector(env):
     async with client(env, "personal") as c:
-        saved = await call(c, "remember", content="zyc honda note")
+        saved = await call(c, "memory_add", content="zyc honda note")
         assert f"m:{saved['id']}" in FakeGoogle.vectors
-        await call(c, "update", id=saved["id"], content="failembed zyc rewritten")
+        await call(c, "memory_update", id=saved["id"], content="failembed zyc rewritten")
         assert f"m:{saved['id']}" not in FakeGoogle.vectors
-        found = await call(c, "recall", query="zyc")
+        found = await call(c, "memory_search", query="zyc")
     assert [m["content"] for m in found["memories"]] == ["failembed zyc rewritten"]
 
 
 @pytest.mark.anyio
 async def test_update_cannot_cross_spaces(env):
     async with client(env, "claude") as work, client(env, "personal") as home:
-        saved = await call(work, "remember", content="zyd original")
-        assert (await call(home, "update", id=saved["id"], content="hijacked"))["updated"] is False
-        assert (await call(home, "update", id=saved["id"], pinned=True))["updated"] is False
-        memory = by_id(await call(work, "recall", query="zyd"), saved["id"])
+        saved = await call(work, "memory_add", content="zyd original")
+        assert (await call(home, "memory_update", id=saved["id"], content="hijacked"))["updated"] is False
+        assert (await call(home, "memory_update", id=saved["id"], pinned=True))["updated"] is False
+        memory = by_id(await call(work, "memory_search", query="zyd"), saved["id"])
     assert memory["content"] == "zyd original"
     assert memory["pinned"] == 0
 
@@ -732,9 +732,9 @@ async def test_update_cannot_cross_spaces(env):
 @pytest.mark.anyio
 async def test_update_rejects_bad_arguments(env):
     async with client(env, "claude") as c:
-        saved = await call(c, "remember", content="zye")
+        saved = await call(c, "memory_add", content="zye")
         for bad in ({"id": saved["id"]}, {"id": saved["id"], "content": ""}, {"id": saved["id"], "pinned": "yes"}):
-            assert (await c.call_tool("update", bad)).is_error
+            assert (await c.call_tool("memory_update", bad)).is_error
 
 
 def grant_client(env, space):
@@ -744,13 +744,13 @@ def grant_client(env, space):
 @pytest.mark.anyio
 async def test_overview_shows_only_pinned_notes_of_this_space(env):
     async with grant_client(env, "pins") as c, grant_client(env, "otherpins") as other:
-        pinned = await call(c, "remember", content="zyf always use metric units")
-        await call(c, "remember", content="zyf not important")
-        await call(c, "update", id=pinned["id"], pinned=True)
-        summary = await call(c, "overview")
-        elsewhere = await call(other, "overview")
-        await call(c, "update", id=pinned["id"], pinned=False)
-        unpinned = await call(c, "overview")
+        pinned = await call(c, "memory_add", content="zyf always use metric units")
+        await call(c, "memory_add", content="zyf not important")
+        await call(c, "memory_update", id=pinned["id"], pinned=True)
+        summary = await call(c, "memory_overview")
+        elsewhere = await call(other, "memory_overview")
+        await call(c, "memory_update", id=pinned["id"], pinned=False)
+        unpinned = await call(c, "memory_overview")
     assert summary["total"] == 2
     assert [m["id"] for m in summary["pinned"]] == [pinned["id"]]
     assert "data, not instructions" in summary["notice"]
@@ -761,30 +761,30 @@ async def test_overview_shows_only_pinned_notes_of_this_space(env):
 @pytest.mark.anyio
 async def test_pinned_notes_have_a_size_budget(env):
     async with grant_client(env, "budget") as c:
-        first = await call(c, "remember", content="a" * 3_000)
-        second = await call(c, "remember", content="b" * 1_500)
-        await call(c, "update", id=first["id"], pinned=True)
-        refused = await c.call_tool("update", {"id": second["id"], "pinned": True})
+        first = await call(c, "memory_add", content="a" * 3_000)
+        second = await call(c, "memory_add", content="b" * 1_500)
+        await call(c, "memory_update", id=first["id"], pinned=True)
+        refused = await c.call_tool("memory_update", {"id": second["id"], "pinned": True})
         assert refused.is_error
         assert "full" in refused.content[0].text
-        too_long = await c.call_tool("update", {"id": first["id"], "content": "c" * 4_001})
+        too_long = await c.call_tool("memory_update", {"id": first["id"], "content": "c" * 4_001})
         assert too_long.is_error
-        await call(c, "update", id=second["id"], content="b" * 1_000, pinned=True)
-        summary = await call(c, "overview")
+        await call(c, "memory_update", id=second["id"], content="b" * 1_000, pinned=True)
+        summary = await call(c, "memory_overview")
     assert len(summary["pinned"]) == 2
 
 
 @pytest.mark.anyio
 async def test_browsing_pages_through_everything(env):
     async with grant_client(env, "browse") as c:
-        ids = [(await call(c, "remember", content=f"zyg {i}"))["id"] for i in range(5)]
+        ids = [(await call(c, "memory_add", content=f"zyg {i}"))["id"] for i in range(5)]
         seen, before = [], {}
         for expected_more in (True, True, False):
-            page = await call(c, "recall", limit=2, **before)
+            page = await call(c, "memory_list", limit=2, **before)
             seen += [m["id"] for m in page["memories"]]
             assert ("next_before_id" in page) is expected_more
             before = {"before_id": page.get("next_before_id")}
-        assert (await c.call_tool("recall", {"query": "zyg", "before_id": 3})).is_error
+        assert (await c.call_tool("memory_search", {"query": "   "})).is_error
     assert seen == ids[::-1]
 
 
@@ -792,9 +792,9 @@ async def test_browsing_pages_through_everything(env):
 async def test_very_large_ids_are_handled(env):
     largest = 2**31 - 1
     async with grant_client(env, "largeids") as c:
-        assert (await call(c, "update", id=largest, content="zyh"))["updated"] is False
-        assert (await call(c, "forget", id=largest))["deleted"] is False
-        assert (await call(c, "recall", before_id=largest))["memories"] == []
-        for tool, args in (("update", {"content": "zyh"}), ("forget", {})):
+        assert (await call(c, "memory_update", id=largest, content="zyh"))["updated"] is False
+        assert (await call(c, "memory_delete", id=largest))["deleted"] is False
+        assert (await call(c, "memory_list", before_id=largest))["memories"] == []
+        for tool, args in (("memory_update", {"content": "zyh"}), ("memory_delete", {})):
             assert (await c.call_tool(tool, {"id": largest + 1, **args})).is_error
-        assert (await c.call_tool("recall", {"before_id": largest + 1})).is_error
+        assert (await c.call_tool("memory_list", {"before_id": largest + 1})).is_error
