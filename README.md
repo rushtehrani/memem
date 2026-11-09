@@ -1,9 +1,10 @@
 # memem
 
 One small memory server you can attach to Claude, ChatGPT and Gemini.
-It speaks MCP and exposes six tools: `memory_overview`, `memory_search`, `memory_list`, `memory_add`, `memory_update` and `memory_delete`.
+It speaks MCP and exposes nine tools: `memory_overview`, `memory_search`, `memory_list`, `memory_add`, `memory_update`, `memory_delete`,
+`memory_upload_link`, `memory_sandbox_upload` and `memory_sandbox_download`.
 
-It runs as a Cloudflare Worker in Python, with a D1 database. Needs [uv](https://docs.astral.sh/uv/),
+It runs as a Cloudflare Worker in Python, with a D1 database and R2 for attached files. Needs [uv](https://docs.astral.sh/uv/),
 Node (for `npx wrangler`) and a Cloudflare account. The Workers free plan is enough to start.
 
 ## Deploy
@@ -19,6 +20,7 @@ Paste the printed `database_id` into `wrangler.jsonc`, then:
 ```bash
 npx wrangler d1 migrations apply memem --remote
 npx wrangler vectorize create memem --dimensions=768 --metric=cosine
+npx wrangler r2 bucket create memem-files
 uv run pywrangler deploy
 ```
 
@@ -53,6 +55,26 @@ Plan limits apply and change over time. ChatGPT may limit write tools on some pl
 (`memory_overview`, `memory_search` and `memory_list`) may work that work there. Google limits custom apps in the Gemini app to personal accounts in
 the US with Keep Activity on. Other developers have reported Gemini's sign-in failing on Google's side.
 
+## Saving files
+
+Files are attached to memories, so assistants can find them through memory search. There are two ways to move a file:
+
+- **Automatic, from the app's code sandbox.** Ask the assistant to save a file, or to fetch one. It gets a single-use
+  link for that one file. Upload links expire in 10 minutes, and download links in 2 minutes.
+- **Manual.** Ask for an upload link or a file's link, or open `/files` on your Worker, and sign in.
+
+Keep approval on for `memory_sandbox_download`, because text hidden in a memory or document could try to get an
+assistant to fetch a file and send it elsewhere. Each memory's page on `/files` shows which connection requested each file.
+
+| App | Automatic transfer |
+| --- | --- |
+| ChatGPT | Upload and download worked in testing with no setup |
+| Claude | Add `memem.YOUR-SUBDOMAIN.workers.dev` to the allowed domains in Claude's capabilities settings. Without it, the sandbox gets a 403. Download worked in testing, and upload is not yet confirmed |
+| Gemini | Not available, since the app had no code execution when tested. Use the manual upload |
+
+Allowing the domain lets Claude's sandbox send data to your Worker. Availability depends on your plan and each app's
+settings.
+
 ## Choosing what each chat can see
 
 - A chat without the connector turned on has no access at all.
@@ -72,6 +94,8 @@ Revoking takes effect on the next request.
 - New connections need a sign-in with the one allowed Google account, and redirects are limited to Claude, ChatGPT and Gemini.
 - All tokens are 256-bit random values, stored only as SHA-256 hashes, and travel only in the `Authorization` header.
 - The space and write permission come from the token. Tools cannot choose another space.
+- Attached files are only ever served as downloads. Moving one needs the Google sign-in or a single-use link requested
+  by a write connection. Upload links can't read anything, and download links fetch one file once within 2 minutes.
 - `memem connect` makes a static token for development and testing. Only its hash is sent to D1.
 - Memories are stored in Cloudflare D1, so Cloudflare hosts their contents. Check its current encryption
   documentation if that matters for what you store.
@@ -131,11 +155,17 @@ Sources           chats and files: raw, never rewritten
 - [ ] Search and read saved chats from other assistants
 - [ ] Full-text keyword search, since `LIKE` won't scale to whole transcripts
 
-### Sources: files
+### Files
 
-- [ ] Shared text files
-- [ ] Shared binary files, stored in R2
-- [ ] Confirm files can be saved and fetched from Claude web and ChatGPT
+Files are attachments on memories. See [the design](docs/file-sharing-design.md).
+
+- [x] Attach several files of any type to a memory, stored in R2
+- [x] Signed-in upload and download page
+- [x] Upload from ChatGPT, and download into ChatGPT and Claude, automatically
+- [ ] Confirm upload from Claude, and the manual page from Gemini
+- [x] Automatic upload from a code sandbox with single-use links
+- [x] Automatic download into a code sandbox with single-use links
+- [ ] Search file names and contents
 
 ### Consolidation
 

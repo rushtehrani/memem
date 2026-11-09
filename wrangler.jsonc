@@ -14,12 +14,14 @@
   ],
   "ai": { "binding": "AI" },
   "vectorize": [{ "binding": "VECTORIZE", "index_name": "memem" }],
+  "r2_buckets": [{ "binding": "FILES", "bucket_name": "memem-files" }],
   // Used by the test suite, which replaces AI and Vectorize with a local stand-in.
   "env": {
     "test": {
       "d1_databases": [
         { "binding": "DB", "database_name": "memem", "database_id": "b62874b4-d8bc-4875-b0b6-4486481b4988" }
-      ]
+      ],
+      "r2_buckets": [{ "binding": "FILES", "bucket_name": "memem-files" }]
     }
   }
 }

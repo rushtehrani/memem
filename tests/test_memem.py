@@ -798,3 +798,295 @@ async def test_very_large_ids_are_handled(env):
         for tool, args in (("memory_update", {"content": "zyh"}), ("memory_delete", {})):
             assert (await c.call_tool(tool, {"id": largest + 1, **args})).is_error
         assert (await c.call_tool("memory_list", {"before_id": largest + 1})).is_error
+
+
+def file_session(env, **claim_overrides):
+    """Sign in to the file page through the stand-in Google, returning cookie headers."""
+    base = env["base"]
+    start = httpx.get(f"{base}/files")
+    assert start.status_code == 302
+    login = re.search(r"memem_session=([^;]+)", start.headers["set-cookie"]).group(1)
+    google = {k: v[0] for k, v in parse_qs(urlsplit(start.headers["location"]).query).items()}
+    code = fake_code({**claims(google["nonce"]), **claim_overrides})
+    done = callback(base, {"state": google["state"], "code": code}, login)
+    if done.status_code != 302:
+        return done
+    token = re.search(r"memem_web=([^;]+)", done.headers["set-cookie"]).group(1)
+    return {"cookie": f"memem_web={token}"}
+
+
+def same_site(env, cookies):
+    return {**cookies, "origin": env["base"], "x-memem": "1"}
+
+
+def new_memory(env, cookies, description, space="work"):
+    reply = httpx.post(f"{env['base']}/files/memories", json={"space": space, "description": description}, headers=same_site(env, cookies))
+    assert reply.status_code == 200, reply.text
+    return reply.json()["id"]
+
+
+def put_file(env, cookies, memory_id, name, content):
+    return httpx.put(
+        f"{env['base']}/files/upload",
+        params={"memory_id": memory_id, "name": name},
+        content=content,
+        headers={**same_site(env, cookies), "content-type": "application/zip"},
+    )
+
+
+def test_file_page_requires_the_owner(env):
+    base = env["base"]
+    start = httpx.get(f"{base}/files?space=work")
+    assert start.status_code == 302 and "/auth?" in start.headers["location"]
+    assert httpx.put(f"{base}/files/upload", content=b"x").status_code == 401
+    assert httpx.post(f"{base}/files/memories", json={}).status_code == 401
+    assert httpx.get(f"{base}/files/download/{'a' * 32}").status_code == 302
+    denied = file_session(env, email="someone@example.com")
+    assert denied.status_code == 403 and "set-cookie" not in denied.headers
+    assert httpx.get(f"{base}/files", headers={"cookie": "memem_web=forged"}).status_code == 302
+
+
+def test_sign_in_returns_only_to_the_requested_file_page(env):
+    base = env["base"]
+    start = httpx.get(f"{base}/files?memory_id=7")
+    login = re.search(r"memem_session=([^;]+)", start.headers["set-cookie"]).group(1)
+    google = {k: v[0] for k, v in parse_qs(urlsplit(start.headers["location"]).query).items()}
+    done = callback(base, {"state": google["state"], "code": fake_code(claims(google["nonce"]))}, login)
+    assert done.headers["location"] == "/files?memory_id=7"
+    assert "HttpOnly" in done.headers["set-cookie"] and "Path=/files" in done.headers["set-cookie"]
+
+
+def test_upload_page_is_locked_down(env):
+    cookies = file_session(env)
+    page = httpx.get(f"{env['base']}/files", headers=cookies)
+    policy = page.headers["content-security-policy"]
+    nonce = re.search(r"'nonce-([^']+)'", policy).group(1)
+    assert f'<script nonce="{nonce}">' in page.text and page.text.count("<script") == 1
+    assert "default-src 'none'" in policy and "frame-ancestors 'none'" in policy
+
+
+@pytest.mark.anyio
+async def test_several_files_attach_and_download(env):
+    cookies = file_session(env)
+    memory_id = new_memory(env, cookies, "zzf launch assets for the vehicle campaign")
+    contents = {"logo.png": secrets.token_bytes(5000), "copy.docx": b"copy", "bundle.zip": secrets.token_bytes(70000)}
+    for name, content in contents.items():
+        assert put_file(env, cookies, memory_id, name, content).status_code == 200
+    async with client(env, "chatgpt") as c:
+        found = await call(c, "memory_search", query="zzf launch")
+        listed = await call(c, "memory_list", limit=5)
+    attachments = by_id(found, memory_id)["attachments"]
+    assert [a["name"] for a in attachments] == list(contents)
+    assert by_id(listed, memory_id)["attachments"] == attachments
+    assert attachments[2]["size"] == 70000
+    for attachment in attachments:
+        assert httpx.get(attachment["browser_download_url"]).status_code == 302
+        download = httpx.get(attachment["browser_download_url"], headers=cookies)
+        assert download.status_code == 200
+        assert download.content == contents[attachment["name"]]
+        assert download.headers["content-type"] == "application/octet-stream"
+        assert download.headers["content-disposition"].startswith("attachment;")
+        assert download.headers["x-content-type-options"] == "nosniff"
+
+
+def test_other_sites_cannot_change_files(env):
+    base = env["base"]
+    cookies = file_session(env)
+    memory_id = new_memory(env, cookies, "zzg")
+    target = f"{base}/files/upload?memory_id={memory_id}&name=a.txt"
+    assert httpx.put(target, content=b"x", headers={**cookies, "origin": "https://evil.example", "x-memem": "1"}).status_code == 403
+    assert httpx.put(target, content=b"x", headers={**cookies, "origin": base}).status_code == 403
+    assert httpx.post(f"{base}/files/memories", json={"space": "work", "description": "x"}, headers=cookies).status_code == 403
+
+
+def test_file_limits_and_bad_names(env):
+    cookies = file_session(env)
+    memory_id = new_memory(env, cookies, "zzh limits")
+    for index in range(20):
+        assert put_file(env, cookies, memory_id, f"{index}.bin", b"x").status_code == 200
+    assert put_file(env, cookies, memory_id, "extra.bin", b"x").status_code == 409
+    other = new_memory(env, cookies, "zzh names")
+    assert put_file(env, cookies, other, "bad\nname.txt", b"x").status_code == 400
+    assert put_file(env, cookies, other, "empty.txt", b"").status_code == 400
+    assert put_file(env, cookies, 2_000_000_000, "a.txt", b"x").status_code == 404
+    host, port = urlsplit(env["base"]).netloc.split(":")
+    with socket.create_connection((host, int(port))) as raw:
+        raw.sendall((
+            f"PUT /files/upload?memory_id={other}&name=big.bin HTTP/1.1\r\nHost: {host}:{port}\r\n"
+            f"Cookie: {cookies['cookie']}\r\nOrigin: {env['base']}\r\nx-memem: 1\r\n"
+            f"Content-Length: {95 * 1024 * 1024 + 1}\r\n\r\n"
+        ).encode())
+        assert b" 413 " in raw.recv(200)
+
+
+def test_file_names_cannot_inject_markup_or_headers(env):
+    cookies = file_session(env)
+    memory_id = new_memory(env, cookies, "<script>zzi</script>")
+    name = 'a"><img src=x>.txt'
+    assert put_file(env, cookies, memory_id, name, b"x").status_code == 200
+    page = httpx.get(f"{env['base']}/files", params={"memory_id": memory_id}, headers=cookies)
+    assert "<img src=x>" not in page.text and "<script>zzi" not in page.text
+    link = re.search(r'/files/download/([A-Za-z0-9_-]+)', page.text).group(0)
+    download = httpx.get(env["base"] + link, headers=cookies)
+    assert '"><img' not in download.headers["content-disposition"]
+
+
+@pytest.mark.anyio
+async def test_removing_a_file_keeps_the_memory(env):
+    cookies = file_session(env)
+    memory_id = new_memory(env, cookies, "zzj removal")
+    keep = put_file(env, cookies, memory_id, "keep.txt", b"keep").json()["id"]
+    drop = put_file(env, cookies, memory_id, "drop.txt", b"drop").json()["id"]
+    assert httpx.delete(f"{env['base']}/files/attachments/{drop}", headers=same_site(env, cookies)).status_code == 200
+    assert httpx.get(f"{env['base']}/files/download/{drop}", headers=cookies).status_code == 404
+    assert httpx.get(f"{env['base']}/files/download/{keep}", headers=cookies).content == b"keep"
+    async with client(env, "claude") as c:
+        memory = by_id(await call(c, "memory_search", query="zzj"), memory_id)
+    assert [a["name"] for a in memory["attachments"]] == ["keep.txt"]
+
+
+@pytest.mark.anyio
+async def test_deleting_a_memory_deletes_its_files(env):
+    cookies = file_session(env)
+    memory_id = new_memory(env, cookies, "zzk deletion")
+    file_id = put_file(env, cookies, memory_id, "a.txt", b"a").json()["id"]
+    async with client(env, "personal") as home, client(env, "claude") as work:
+        assert (await call(home, "memory_delete", id=memory_id))["deleted"] is False
+        assert httpx.get(f"{env['base']}/files/download/{file_id}", headers=cookies).status_code == 200
+        assert (await call(work, "memory_delete", id=memory_id))["deleted"] is True
+    assert httpx.get(f"{env['base']}/files/download/{file_id}", headers=cookies).status_code == 404
+
+
+@pytest.mark.anyio
+async def test_attachments_stay_in_their_space(env):
+    cookies = file_session(env)
+    memory_id = new_memory(env, cookies, "zzl private assets")
+    put_file(env, cookies, memory_id, "a.txt", b"a")
+    async with client(env, "personal") as home:
+        assert (await call(home, "memory_search", query="zzl"))["memories"] == []
+        assert all(m["id"] != memory_id for m in (await call(home, "memory_list", limit=100))["memories"])
+        assert (await home.call_tool("memory_upload_link", {"memory_id": memory_id})).is_error
+
+
+@pytest.mark.anyio
+async def test_upload_link_tool(env):
+    cookies = file_session(env)
+    memory_id = new_memory(env, cookies, "zzm link")
+    async with client(env, "claude") as c, client(env, "reader") as reader:
+        fresh = await call(c, "memory_upload_link")
+        existing = await call(c, "memory_upload_link", memory_id=memory_id)
+        assert (await reader.call_tool("memory_upload_link", {})).is_error
+    assert fresh["url"] == f"{env['base']}/files?space=work"
+    assert existing["url"] == f"{env['base']}/files?memory_id={memory_id}"
+    assert httpx.get(existing["url"], headers=cookies).status_code == 200
+
+
+async def sandbox_url(c, **args):
+    return (await call(c, "memory_sandbox_upload", **args))["upload_url"]
+
+
+@pytest.mark.anyio
+async def test_sandbox_uploads_a_file_without_sign_in(env):
+    content = secrets.token_bytes(40000)
+    async with client(env, "chatgpt") as c:
+        url = await sandbox_url(c, name="report.zip", description="zzn quarterly report bundle")
+        reply = httpx.put(url, content=content)
+        assert reply.status_code == 200, reply.text
+        memory = by_id(await call(c, "memory_search", query="zzn"), reply.json()["memory_id"])
+    assert memory["source"].startswith("claude-") and memory["attachments"][0]["name"] == "report.zip"
+    download_url = memory["attachments"][0]["browser_download_url"]
+    assert httpx.get(download_url).status_code == 302
+    assert httpx.get(download_url, headers=file_session(env)).content == content
+
+
+@pytest.mark.anyio
+async def test_sandbox_link_works_once_and_grants_nothing_else(env):
+    async with client(env, "claude") as c:
+        url = await sandbox_url(c, name="a.bin", description="zzo")
+    assert httpx.get(url).status_code == 405
+    assert httpx.delete(url).status_code == 405
+    assert httpx.put(url, content=b"").status_code == 400
+    assert httpx.put(url, content=b"x").status_code == 200
+    assert httpx.put(url, content=b"x").status_code == 403
+    assert httpx.put(f"{env['base']}/files/direct/{'a' * 43}", content=b"x").status_code == 403
+    token = url.rsplit("/", 1)[1]
+    assert httpx.get(f"{env['base']}/files", headers={"cookie": f"memem_web={token}"}).status_code == 302
+
+
+@pytest.mark.anyio
+async def test_sandbox_link_expires_and_leaves_no_memory(env):
+    async with client(env, "personal") as c:
+        url = await sandbox_url(c, name="a.bin", description="zzp expired")
+        d1(env["persist"], "UPDATE upload_tokens SET expires_at = 1")
+        assert httpx.put(url, content=b"x").status_code == 403
+        assert (await call(c, "memory_search", query="zzp"))["memories"] == []
+
+
+@pytest.mark.anyio
+async def test_sandbox_upload_is_limited_by_access_and_space(env):
+    cookies = file_session(env)
+    memory_id = new_memory(env, cookies, "zzq work only")
+    async with client(env, "personal") as home, client(env, "reader") as reader, client(env, "claude") as work:
+        assert (await home.call_tool("memory_sandbox_upload", {"name": "a", "memory_id": memory_id})).is_error
+        assert (await reader.call_tool("memory_sandbox_upload", {"name": "a", "description": "x"})).is_error
+        assert (await work.call_tool("memory_sandbox_upload", {"name": "a"})).is_error
+        assert (await work.call_tool("memory_sandbox_upload", {"name": "a\nb", "description": "x"})).is_error
+        url = await sandbox_url(work, name="more.bin", memory_id=memory_id)
+    assert httpx.put(url, content=b"x").json()["memory_id"] == memory_id
+
+
+async def attached(env, c, cookies, label, content=b"secret bytes"):
+    memory_id = new_memory(env, cookies, label)
+    assert put_file(env, cookies, memory_id, "file.bin", content).status_code == 200
+    found = await call(c, "memory_search", query=label)
+    return memory_id, by_id(found, memory_id)["attachments"][0], found
+
+
+@pytest.mark.anyio
+async def test_sandbox_downloads_a_file_once_without_sign_in(env):
+    cookies = file_session(env)
+    content = secrets.token_bytes(30000)
+    async with client(env, "claude") as c:
+        memory_id, attachment, found = await attached(env, c, cookies, "zzr", content)
+        assert "sign-in" in found["attachment_note"]
+        link = await call(c, "memory_sandbox_download", attachment_id=attachment["id"])
+    assert link["expires_in_seconds"] == 120
+    url = link["download_url"]
+    assert httpx.put(url, content=b"x").status_code == 405
+    first = httpx.get(url)
+    assert first.status_code == 200 and first.content == content
+    assert first.headers["content-type"] == "application/octet-stream"
+    assert first.headers["content-disposition"].startswith("attachment;")
+    assert httpx.get(url).status_code == 403
+    assert httpx.get(f"{env['base']}/files/fetch/{'a' * 43}").status_code == 403
+    page = httpx.get(f"{env['base']}/files", params={"memory_id": memory_id}, headers=cookies)
+    assert "Sandbox downloads" in page.text and ", fetched" in page.text
+
+
+@pytest.mark.anyio
+async def test_sandbox_download_link_expires(env):
+    cookies = file_session(env)
+    async with client(env, "claude") as c:
+        _, attachment, _ = await attached(env, c, cookies, "zzs expiring")
+        url = (await call(c, "memory_sandbox_download", attachment_id=attachment["id"]))["download_url"]
+    d1(env["persist"], "UPDATE download_links SET expires_at = 1")
+    assert httpx.get(url).status_code == 403
+
+
+@pytest.mark.anyio
+async def test_sandbox_download_is_limited_by_access_and_space(env):
+    cookies = file_session(env)
+    async with client(env, "claude") as work, client(env, "personal") as home, client(env, "reader") as reader:
+        _, attachment, _ = await attached(env, work, cookies, "zzt guarded")
+        assert (await home.call_tool("memory_sandbox_download", {"attachment_id": attachment["id"]})).is_error
+        assert (await reader.call_tool("memory_sandbox_download", {"attachment_id": attachment["id"]})).is_error
+        assert (await work.call_tool("memory_sandbox_download", {"attachment_id": "a" * 32})).is_error
+        url = (await call(work, "memory_sandbox_download", attachment_id=attachment["id"]))["download_url"]
+        assert httpx.put(url.replace("/fetch/", "/direct/"), content=b"x").status_code == 403
+
+
+@pytest.mark.anyio
+async def test_results_without_files_have_no_attachment_note(env):
+    async with grant_client(env, "notes") as c:
+        await call(c, "memory_add", content="zzu plain")
+        assert "attachment_note" not in await call(c, "memory_list")

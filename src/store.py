@@ -6,7 +6,15 @@ import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from js import Object
+from pyodide.ffi import to_js
+
 MAX_MEMORIES_PER_SPACE = 10_000
+MAX_ATTACHMENTS_PER_MEMORY = 20
+# Written into the SQL directly, because D1 fails on integers this large bound from Python.
+MAX_TOTAL_FILE_BYTES = 5 * 1024**3
+ABANDONED_UPLOAD_AGE = 3600
+DOWNLOAD_LOG_AGE = 90 * 24 * 3600
 MAX_QUERY_WORDS = 20
 CANDIDATES = 50
 # Measured on bge-base-en-v1.5: relevant queries scored 0.55 or more, unrelated ones 0.50 or less.
@@ -38,6 +46,10 @@ class PinnedFull(SpaceFull):
     pass
 
 
+class AttachmentRefused(Exception):
+    pass
+
+
 @dataclass(frozen=True)
 class Connection:
     label: str
@@ -58,9 +70,11 @@ def _like(word: str) -> str:
 
 
 class Store:
-    def __init__(self, db, semantic=None):
+    def __init__(self, db, semantic=None, files=None, origin=""):
         self._db = db
         self._semantic = semantic
+        self.files = files
+        self.origin = origin
 
     async def _all(self, sql: str, *params) -> list[dict]:
         result = await self._db.prepare(sql).bind(*params).all()
@@ -272,8 +286,193 @@ class Store:
             MAX_PINNED_ROWS,
         )
         count = await self._all("SELECT COUNT(*) AS total FROM memories WHERE space = ?", space)
-        return {"total": count[0]["total"], "pinned": pinned}
+        return {"total": count[0]["total"], "pinned": await self._with_attachments(space, pinned)}
 
+    async def _with_attachments(self, space: str, memories: list[dict]) -> list[dict]:
+        if not memories:
+            return memories
+        marks = ", ".join("?" * len(memories))
+        rows = await self._all(
+            "SELECT memory_id, public_id, name, media_type, size FROM attachments"
+            f" WHERE space = ? AND uploading = 0 AND deleting = 0 AND memory_id IN ({marks}) ORDER BY id",
+            space,
+            *[memory["id"] for memory in memories],
+        )
+        for row in rows:
+            memory = next(m for m in memories if m["id"] == row["memory_id"])
+            memory.setdefault("attachments", []).append(
+                {
+                    "id": row["public_id"],
+                    "name": row["name"],
+                    "media_type": row["media_type"],
+                    "size": row["size"],
+                    "browser_download_url": f"{self.origin}/files/download/{row['public_id']}",
+                }
+            )
+        return memories
+
+    async def memory_exists(self, space: str, memory_id: int) -> bool:
+        return bool(await self._all("SELECT id FROM memories WHERE space = ? AND id = ?", space, memory_id))
+
+    async def memory_with_attachments(self, memory_id: int) -> tuple[dict, list[dict]] | None:
+        """For the signed-in owner's file page, which is not limited to one space."""
+        memories = await self._all(f"SELECT space, {_COLUMNS} FROM memories WHERE id = ?", memory_id)
+        if not memories:
+            return None
+        rows = await self._all(
+            "SELECT public_id, name, size FROM attachments"
+            " WHERE memory_id = ? AND uploading = 0 AND deleting = 0 ORDER BY id",
+            memory_id,
+        )
+        return memories[0], rows
+
+    async def reserve_attachment(self, memory_id: int, public_id: str, name: str, media_type: str, size: int, r2_key: str) -> None:
+        now = int(time.time())
+        await self._all(
+            "UPDATE attachments SET deleting = 1 WHERE uploading = 1 AND created_at < ? RETURNING id",
+            now - ABANDONED_UPLOAD_AGE,
+        )
+        await self.sweep_files()
+        # One statement, so concurrent uploads cannot pass either limit.
+        rows = await self._all(
+            "INSERT INTO attachments (public_id, memory_id, space, name, media_type, size, r2_key, created_at)"
+            " SELECT ?, id, space, ?, ?, ?, ?, ? FROM memories WHERE id = ?"
+            " AND (SELECT COUNT(*) FROM attachments WHERE memory_id = ? AND deleting = 0) < ?"
+            f" AND (SELECT COALESCE(SUM(size), 0) FROM attachments WHERE deleting = 0) + ? <= {MAX_TOTAL_FILE_BYTES}"
+            " RETURNING id",
+            public_id,
+            name,
+            media_type,
+            size,
+            r2_key,
+            now,
+            memory_id,
+            memory_id,
+            MAX_ATTACHMENTS_PER_MEMORY,
+            size,
+        )
+        if rows:
+            return
+        if await self._all("SELECT id FROM memories WHERE id = ?", memory_id):
+            raise AttachmentRefused(
+                f"A memory can have {MAX_ATTACHMENTS_PER_MEMORY} files, and file storage has a size limit. "
+                "Remove something first."
+            )
+        raise LookupError
+
+    async def finish_attachment(self, public_id: str) -> None:
+        await self._all("UPDATE attachments SET uploading = 0 WHERE public_id = ? RETURNING id", public_id)
+
+    async def discard_attachment(self, public_id: str) -> bool:
+        rows = await self._all(
+            "UPDATE attachments SET deleting = 1 WHERE public_id = ? AND deleting = 0 RETURNING id", public_id
+        )
+        await self.sweep_files()
+        return bool(rows)
+
+    async def attachment(self, public_id: str) -> dict | None:
+        rows = await self._all(
+            "SELECT name, size, r2_key FROM attachments WHERE public_id = ? AND uploading = 0 AND deleting = 0",
+            public_id,
+        )
+        return rows[0] if rows else None
+
+    async def sweep_files(self) -> None:
+        """Remove files marked for deletion. Rows stay marked until R2 confirms, so a failure is retried."""
+        if self.files is None:
+            return
+        rows = await self._all("SELECT id, r2_key FROM attachments WHERE deleting = 1 LIMIT 100")
+        if not rows:
+            return
+        try:
+            await self.files.delete(to_js([row["r2_key"] for row in rows], dict_converter=Object.fromEntries))
+        except Exception as err:
+            print("file delete failed:", type(err).__name__)
+            return
+        marks = ", ".join("?" * len(rows))
+        await self._all(f"DELETE FROM attachments WHERE id IN ({marks}) RETURNING id", *[row["id"] for row in rows])
+
+    async def create_upload_token(self, token_hash: str, space: str, memory_id: int, description: str, name: str, source: str, expires_at: int) -> None:
+        await self._all("DELETE FROM upload_tokens WHERE expires_at <= ? RETURNING token_hash", int(time.time()))
+        await self._all(
+            "INSERT INTO upload_tokens (token_hash, space, memory_id, description, name, source, expires_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING token_hash",
+            token_hash,
+            space,
+            memory_id,
+            description,
+            name,
+            source,
+            expires_at,
+        )
+
+    async def claim_upload_token(self, token_hash: str) -> dict | None:
+        # Claiming deletes the token, so a link works only once.
+        rows = await self._all(
+            "DELETE FROM upload_tokens WHERE token_hash = ? AND expires_at > ? RETURNING *",
+            token_hash,
+            int(time.time()),
+        )
+        return rows[0] if rows else None
+
+    async def attachment_in_space(self, space: str, public_id: str) -> bool:
+        rows = await self._all(
+            "SELECT id FROM attachments WHERE space = ? AND public_id = ? AND uploading = 0 AND deleting = 0",
+            space,
+            public_id,
+        )
+        return bool(rows)
+
+    async def create_download_link(self, token_hash: str, public_id: str, source: str, ttl: int) -> None:
+        now = int(time.time())
+        await self._all(
+            "DELETE FROM download_links WHERE requested_at < ? RETURNING token_hash", now - DOWNLOAD_LOG_AGE
+        )
+        await self._all(
+            "INSERT INTO download_links (token_hash, public_id, source, requested_at, expires_at)"
+            " VALUES (?, ?, ?, ?, ?) RETURNING token_hash",
+            token_hash,
+            public_id,
+            source,
+            now,
+            now + ttl,
+        )
+
+    async def claim_download_link(self, token_hash: str) -> dict | None:
+        # One statement, so a link can be spent only once. The row stays as the download log.
+        now = int(time.time())
+        rows = await self._all(
+            "UPDATE download_links SET fetched_at = ? WHERE token_hash = ? AND expires_at > ? AND fetched_at = 0"
+            " RETURNING public_id",
+            now,
+            token_hash,
+            now,
+        )
+        return rows[0] if rows else None
+
+    async def download_activity(self, memory_id: int) -> list[dict]:
+        return await self._all(
+            "SELECT a.name, d.source, d.requested_at, d.fetched_at FROM download_links d"
+            " JOIN attachments a ON a.public_id = d.public_id"
+            " WHERE a.memory_id = ? ORDER BY d.requested_at DESC LIMIT 20",
+            memory_id,
+        )
+
+    async def create_web_session(self, token_hash: str, expires_at: int) -> None:
+        await self._all("DELETE FROM web_sessions WHERE expires_at <= ? RETURNING token_hash", int(time.time()))
+        await self._all(
+            "INSERT INTO web_sessions (token_hash, expires_at) VALUES (?, ?) RETURNING token_hash",
+            token_hash,
+            expires_at,
+        )
+
+    async def web_session_valid(self, token_hash: str) -> bool:
+        rows = await self._all(
+            "SELECT token_hash FROM web_sessions WHERE token_hash = ? AND expires_at > ?",
+            token_hash,
+            int(time.time()),
+        )
+        return bool(rows)
     async def browse(self, space: str, before_id: int | None, limit: int) -> tuple[list[dict], int | None]:
         """Newest first. Also returns the id to continue from, if there is more."""
         below, below_params = (" AND id < ?", [before_id]) if before_id is not None else ("", [])
@@ -283,7 +482,8 @@ class Store:
             *below_params,
             limit + 1,
         )
-        return rows[:limit], rows[limit - 1]["id"] if len(rows) > limit else None
+        more = rows[limit - 1]["id"] if len(rows) > limit else None
+        return await self._with_attachments(space, rows[:limit]), more
 
     async def _keyword_matches(self, space: str, query: str) -> list[dict]:
         words = _search_words(query)
@@ -330,7 +530,7 @@ class Store:
         best = sorted(scores, key=lambda memory_id: (-scores[memory_id], -memory_id))[:limit]
 
         rows = {row["id"]: row for row in await self._rows_by_id(space, best)}
-        return [rows[memory_id] for memory_id in best if memory_id in rows]
+        return await self._with_attachments(space, [rows[memory_id] for memory_id in best if memory_id in rows])
 
     async def forget(self, space: str, memory_id: int) -> bool:
         rows = await self._all(
@@ -338,5 +538,9 @@ class Store:
         )
         if not rows:
             return False
+        await self._all(
+            "UPDATE attachments SET deleting = 1 WHERE space = ? AND memory_id = ? RETURNING id", space, memory_id
+        )
         await self._remove_vector(memory_id)
+        await self.sweep_files()
         return True

@@ -13,6 +13,7 @@ Workers AI and Vectorize. Keep it small: prefer the simplest change that fully s
 | `src/oauth.py` | OAuth 2.1 server and Google sign-in |
 | `src/store.py` | D1 queries and hybrid recall |
 | `src/semantic.py` | Workers AI embeddings, Vectorize, and the test stand-in |
+| `src/files.py` | The owner's signed-in page for attaching files, stored in R2 |
 | `memem/cli.py` | Local admin CLI (`connect`, `list`, `revoke`, `set-google`), which runs on your machine, not in the Worker |
 | `migrations/` | D1 schema, applied in filename order |
 | `tests/test_memem.py` | End-to-end tests against a real local Worker |
@@ -69,6 +70,9 @@ These are the parts of the design most easily broken by accident. Each change mu
 - **Read-only connections get only the read tools**, both in `tools/list` and when a tool is called.
 - **Edits record who made them.** `source` keeps the original author and `updated_by` the latest editor, both set by the
   server, so a memory's history can't be forged through a tool.
+- **Attached files are opaque.** Always serve them as downloads, and require the Google session for every upload and
+  download. Links alone grant access only as single-use `/files/direct/` uploads, which can add one
+  file, and `/files/fetch/` downloads, which fetch one file once within two minutes. Both need a write connection.
 - **Never commit secrets**, tokens or local state such as `.wrangler/` and `.dev.vars`.
 
 ## Conventions

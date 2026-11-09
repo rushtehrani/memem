@@ -21,6 +21,10 @@ REFRESH_TTL = 90 * 24 * 3600
 CODE_TTL = 300
 LOGIN_TTL = 900
 SESSION_COOKIE = "memem_session"
+WEB_COOKIE = "memem_web"
+WEB_SESSION_TTL = 12 * 3600
+# Registered clients are always named client_..., so this cannot be claimed through registration.
+WEB_CLIENT = "web"
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 MAX_FORM_BYTES = 16 * 1024
@@ -292,6 +296,10 @@ async def authorize(request, store, origin: str, google: dict | None) -> Respons
         can_write="read_only" not in params,
         expires_at=int(time.time()) + LOGIN_TTL,
     )
+    return Response("", status=302, headers={**_NO_STORE, "location": _google_url(google, origin, state, nonce)})
+
+
+def _google_url(google: dict, origin: str, state: str, nonce: str) -> str:
     query = urlencode(
         {
             "client_id": google["client_id"],
@@ -303,7 +311,41 @@ async def authorize(request, store, origin: str, google: dict | None) -> Respons
             "prompt": "select_account",
         }
     )
-    return Response("", status=302, headers={**_NO_STORE, "location": f"{google['auth_url']}?{query}"})
+    return f"{google['auth_url']}?{query}"
+
+
+async def begin_web_sign_in(store, origin: str, google: dict | None, target: str) -> Response:
+    """Send the owner to Google, returning afterward to a page under /files."""
+    if google is None:
+        return _message("Google sign-in has not been set up on this server.", 503)
+    session, state, nonce = (secrets.token_urlsafe(32) for _ in range(3))
+    await store.create_pending(
+        state_hash=hash_secret(state),
+        session_hash=hash_secret(session),
+        nonce=nonce,
+        client_id=WEB_CLIENT,
+        redirect_uri=target,
+        code_challenge="",
+        client_state="",
+        resource="",
+        space="",
+        can_write=False,
+        expires_at=int(time.time()) + LOGIN_TTL,
+    )
+    return Response(
+        "",
+        status=302,
+        headers={
+            **_NO_STORE,
+            "location": _google_url(google, origin, state, nonce),
+            "set-cookie": _cookie(origin, session, LOGIN_TTL),
+        },
+    )
+
+
+def _web_cookie(origin: str, value: str) -> str:
+    secure = "; Secure" if origin.startswith("https:") else ""
+    return f"{WEB_COOKIE}={value}; HttpOnly; SameSite=Lax; Path=/files; Max-Age={WEB_SESSION_TTL}{secure}"
 
 
 def _claims_of(id_token: str) -> dict:
@@ -362,6 +404,15 @@ async def google_callback(request, store, origin: str, google: dict | None) -> R
         return _message("Google could not confirm this sign-in. Please try again.", 502)
     if not _identity_ok(claims, google, pending["nonce"]):
         return _message("This Google account is not allowed to use this memem server.", 403)
+
+    if pending["client_id"] == WEB_CLIENT:
+        token = secrets.token_urlsafe(32)
+        await store.create_web_session(hash_secret(token), int(time.time()) + WEB_SESSION_TTL)
+        return Response(
+            "",
+            status=302,
+            headers={**_NO_STORE, "location": pending["redirect_uri"], "set-cookie": _web_cookie(origin, token)},
+        )
 
     code = secrets.token_urlsafe(32)
     uri = pending["redirect_uri"]
