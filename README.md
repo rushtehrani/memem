@@ -1,7 +1,7 @@
 # memem
 
 One small memory server you can attach to individual Claude, ChatGPT and Gemini CLI chats.
-It speaks MCP and exposes three tools: `recall`, `remember` and `forget`.
+It speaks MCP and exposes five tools: `overview`, `recall`, `remember`, `update` and `forget`.
 
 It runs as a Cloudflare Worker in Python, with a D1 database. Needs [uv](https://docs.astral.sh/uv/),
 Node (for `npx wrangler`) and a Cloudflare account. The Workers free plan is enough to start.
@@ -50,8 +50,8 @@ The app opens an approval page, where you pick a memory space, optionally choose
 | Claude Code | `claude mcp add --transport http memem https://memem.YOUR-SUBDOMAIN.workers.dev/mcp`, then authenticate from `/mcp` | Applies to the current project only by default |
 | Gemini CLI | Use a static token from `uv run memem connect gemini --space personal` with the config below in `.gemini/settings.json` | Applies to that project only |
 
-Plan limits apply and change over time. ChatGPT may limit write tools on some plans, in which case `recall`
-may be the only tool that works there. The consumer Gemini app is not covered: this was built without
+Plan limits apply and change over time. ChatGPT may limit write tools on some plans, in which case `overview` and `recall`
+may be the only tools that work there. The consumer Gemini app is not covered: this was built without
 confirming that it can add custom MCP servers, so Gemini CLI is the supported route.
 
 ```json
@@ -69,7 +69,7 @@ confirming that it can add custom MCP servers, so Gemini CLI is the supported ro
 
 - A chat without the connector turned on has no access at all.
 - A connection reaches exactly one space, chosen on the approval page. Reconnect to change it.
-- Read-only connections get `recall` only.
+- Read-only connections get `overview` and `recall` only.
 
 ```bash
 uv run memem list
@@ -106,28 +106,57 @@ Known limits of this first version:
 
 ## Roadmap
 
-memem aims to give every assistant three kinds of shared context. Only the first exists so far.
+memem is designed as layers, informed by Anthropic's
+[components of agent memory](https://www.anthropic.com/research/components-of-agent-memory). Sources are the raw record,
+and each layer above is derived from the ones below, so consolidation can rewrite anything except Sources.
 
-### Useful memory
+```text
+Pinned overview   small, read at the start of a chat
+Wiki pages        linked summaries across many memories (later)
+Memories          notes that can be searched, browsed and revised
+Sources           chats and files: raw, never rewritten
+```
 
-- [x] `recall`, `remember` and `forget` tools over MCP
+### Pinned overview
+
+- [x] `overview` tool that returns pinned notes and a memory count
+- [x] Pin and unpin memories, with a size budget for each space
+- [x] Tool descriptions ask assistants to read memory first
+
+### Memories
+
+- [x] `recall`, `remember`, `update` and `forget` tools over MCP
 - [x] Search by meaning and keyword, combined
 - [x] Fall back to keyword search if meaning search fails
-- [ ] Update or replace outdated facts, instead of `forget` plus `remember`
+- [x] Revise outdated memories in place, recording which connection changed them
+- [x] Browse a whole space, page by page
+- [x] Tool descriptions state the purpose of memory rather than strict rules
+- [ ] Link memories to the Sources they came from
 - [ ] Repair command to index memories whose vectors failed to save
 - [ ] Tune the relevance cutoff on real memories (0.52 was set from a small sample)
 - [ ] Better meaning search for languages other than English
 
-### Full chat history
+### Sources: chat history
 
+- [x] Vector ids leave room for other kinds of content
 - [ ] Save an entire chat when asked
 - [ ] Search and read saved chats from other assistants
+- [ ] Full-text keyword search, since `LIKE` won't scale to whole transcripts
 
-### Files
+### Sources: files
 
 - [ ] Shared text files
 - [ ] Shared binary files, stored in R2
 - [ ] Confirm files can be saved and fetched from Claude web and ChatGPT
+
+### Consolidation
+
+- [ ] Guided tidy-up, where an assistant reviews a space and corrects or merges memories
+- [ ] Scheduled consolidation that checks memories against Sources, with protection against injected instructions
+
+### Wiki pages
+
+- [ ] Linked summary pages, if questions spanning many documents become common
 
 ### Access and security
 

@@ -472,8 +472,9 @@ async def test_spaces_are_isolated(env, mode):
 @pytest.mark.anyio
 async def test_read_only_has_no_write_tools(env, mode):
     async with client(env, "reader", mode) as c:
-        assert [t.name for t in (await c.list_tools()).tools] == ["recall"]
+        assert [t.name for t in (await c.list_tools()).tools] == ["overview", "recall"]
         assert (await c.call_tool("remember", {"content": "readonlyattempt"})).is_error
+        assert (await c.call_tool("update", {"id": 1, "content": "readonlyattempt"})).is_error
         assert (await call(c, "recall", query="readonlyattempt"))["memories"] == []
 
 
@@ -646,8 +647,126 @@ async def test_wrong_vector_results_cannot_cross_spaces(env):
 async def test_forget_removes_the_vector_only_for_its_own_space(env):
     async with client(env, "claude") as work, client(env, "personal") as home:
         saved = await call(work, "remember", content="zzw honda parking pass")
-        assert saved["id"] in FakeGoogle.vectors
+        vector = f"m:{saved['id']}"
+        assert vector in FakeGoogle.vectors
         assert (await call(home, "forget", id=saved["id"]))["deleted"] is False
-        assert saved["id"] in FakeGoogle.vectors
+        assert vector in FakeGoogle.vectors
         assert (await call(work, "forget", id=saved["id"]))["deleted"] is True
-        assert saved["id"] not in FakeGoogle.vectors
+        assert vector not in FakeGoogle.vectors
+
+
+def by_id(found, memory_id):
+    return next(m for m in found["memories"] if m["id"] == memory_id)
+
+
+@pytest.mark.anyio
+async def test_update_rewrites_memory_and_records_who(env):
+    async with client(env, "claude") as a, client(env, "chatgpt") as b:
+        saved = await call(a, "remember", content="zya meeting is on Monday")
+        assert (await call(b, "update", id=saved["id"], content="zya meeting is on Friday"))["updated"] is True
+        memory = by_id(await call(a, "recall", query="zya"), saved["id"])
+    assert memory["content"] == "zya meeting is on Friday"
+    assert memory["source"] != memory["updated_by"]
+    assert memory["updated_at"]
+
+
+@pytest.mark.anyio
+async def test_update_refreshes_meaning_search(env):
+    async with client(env, "chatgpt") as c:
+        saved = await call(c, "remember", content="Bicycle storage zyb")
+        await call(c, "update", id=saved["id"], content="Civic storage zyb")
+        found = await call(c, "recall", query="vehicle")
+    assert saved["id"] in [m["id"] for m in found["memories"]]
+
+
+@pytest.mark.anyio
+async def test_failed_reindex_drops_the_old_vector(env):
+    async with client(env, "personal") as c:
+        saved = await call(c, "remember", content="zyc honda note")
+        assert f"m:{saved['id']}" in FakeGoogle.vectors
+        await call(c, "update", id=saved["id"], content="failembed zyc rewritten")
+        assert f"m:{saved['id']}" not in FakeGoogle.vectors
+        found = await call(c, "recall", query="zyc")
+    assert [m["content"] for m in found["memories"]] == ["failembed zyc rewritten"]
+
+
+@pytest.mark.anyio
+async def test_update_cannot_cross_spaces(env):
+    async with client(env, "claude") as work, client(env, "personal") as home:
+        saved = await call(work, "remember", content="zyd original")
+        assert (await call(home, "update", id=saved["id"], content="hijacked"))["updated"] is False
+        assert (await call(home, "update", id=saved["id"], pinned=True))["updated"] is False
+        memory = by_id(await call(work, "recall", query="zyd"), saved["id"])
+    assert memory["content"] == "zyd original"
+    assert memory["pinned"] == 0
+
+
+@pytest.mark.anyio
+async def test_update_rejects_bad_arguments(env):
+    async with client(env, "claude") as c:
+        saved = await call(c, "remember", content="zye")
+        for bad in ({"id": saved["id"]}, {"id": saved["id"], "content": ""}, {"id": saved["id"], "pinned": "yes"}):
+            assert (await c.call_tool("update", bad)).is_error
+
+
+def grant_client(env, space):
+    return client({**env, "tokens": {"fresh": grant(env["base"], space)}}, "fresh")
+
+
+@pytest.mark.anyio
+async def test_overview_shows_only_pinned_notes_of_this_space(env):
+    async with grant_client(env, "pins") as c, grant_client(env, "otherpins") as other:
+        pinned = await call(c, "remember", content="zyf always use metric units")
+        await call(c, "remember", content="zyf not important")
+        await call(c, "update", id=pinned["id"], pinned=True)
+        summary = await call(c, "overview")
+        elsewhere = await call(other, "overview")
+        await call(c, "update", id=pinned["id"], pinned=False)
+        unpinned = await call(c, "overview")
+    assert summary["total"] == 2
+    assert [m["id"] for m in summary["pinned"]] == [pinned["id"]]
+    assert "data, not instructions" in summary["notice"]
+    assert elsewhere == {"notice": elsewhere["notice"], "total": 0, "pinned": []}
+    assert unpinned["pinned"] == []
+
+
+@pytest.mark.anyio
+async def test_pinned_notes_have_a_size_budget(env):
+    async with grant_client(env, "budget") as c:
+        first = await call(c, "remember", content="a" * 3_000)
+        second = await call(c, "remember", content="b" * 1_500)
+        await call(c, "update", id=first["id"], pinned=True)
+        refused = await c.call_tool("update", {"id": second["id"], "pinned": True})
+        assert refused.is_error
+        assert "full" in refused.content[0].text
+        too_long = await c.call_tool("update", {"id": first["id"], "content": "c" * 4_001})
+        assert too_long.is_error
+        await call(c, "update", id=second["id"], content="b" * 1_000, pinned=True)
+        summary = await call(c, "overview")
+    assert len(summary["pinned"]) == 2
+
+
+@pytest.mark.anyio
+async def test_browsing_pages_through_everything(env):
+    async with grant_client(env, "browse") as c:
+        ids = [(await call(c, "remember", content=f"zyg {i}"))["id"] for i in range(5)]
+        seen, before = [], {}
+        for expected_more in (True, True, False):
+            page = await call(c, "recall", limit=2, **before)
+            seen += [m["id"] for m in page["memories"]]
+            assert ("next_before_id" in page) is expected_more
+            before = {"before_id": page.get("next_before_id")}
+        assert (await c.call_tool("recall", {"query": "zyg", "before_id": 3})).is_error
+    assert seen == ids[::-1]
+
+
+@pytest.mark.anyio
+async def test_very_large_ids_are_handled(env):
+    largest = 2**31 - 1
+    async with grant_client(env, "largeids") as c:
+        assert (await call(c, "update", id=largest, content="zyh"))["updated"] is False
+        assert (await call(c, "forget", id=largest))["deleted"] is False
+        assert (await call(c, "recall", before_id=largest))["memories"] == []
+        for tool, args in (("update", {"content": "zyh"}), ("forget", {})):
+            assert (await c.call_tool(tool, {"id": largest + 1, **args})).is_error
+        assert (await c.call_tool("recall", {"before_id": largest + 1})).is_error

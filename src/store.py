@@ -12,6 +12,11 @@ CANDIDATES = 50
 # Measured on bge-base-en-v1.5: relevant queries scored 0.55 or more, unrelated ones 0.50 or less.
 MIN_SIMILARITY = 0.52
 RANK_CONSTANT = 60
+# Every chat reads the pinned notes first, so they must stay small.
+MAX_PINNED_CHARS = 4_000
+MAX_PINNED_ROWS = 100
+_MEMORY_VECTOR = "m:"  # Other kinds of searchable content will use their own prefix.
+_COLUMNS = "id, content, source, created_at, updated_at, updated_by, pinned"
 _STOP_WORDS = frozenset(
     "the and for are but not you all any can had her was one our out has him his how its may new now "
     "see two who did get let put say she too use what when where which why with would could should "
@@ -26,6 +31,10 @@ def _hash(secret: str) -> str:
 
 
 class SpaceFull(Exception):
+    pass
+
+
+class PinnedFull(SpaceFull):
     pass
 
 
@@ -196,6 +205,13 @@ class Store:
             print("semantic search failed:", type(err).__name__)
             return None
 
+    async def _add_vector(self, space: str, memory_id: int, content: str) -> bool:
+        await self._semantic.add(space, f"{_MEMORY_VECTOR}{memory_id}", content)
+        return True
+
+    async def _remove_vector(self, memory_id: int) -> None:
+        await self._guarded(lambda: self._semantic.remove(f"{_MEMORY_VECTOR}{memory_id}"))
+
     async def remember(self, space: str, content: str, source: str) -> int:
         # One statement, so concurrent writers cannot push a space past its cap.
         rows = await self._all(
@@ -213,8 +229,61 @@ class Store:
         if not rows:
             raise SpaceFull("This memory space is full. Forget something first.")
         memory_id = rows[0]["id"]
-        await self._guarded(lambda: self._semantic.add(space, memory_id, content))
+        await self._guarded(lambda: self._add_vector(space, memory_id, content))
         return memory_id
+
+    async def update(
+        self, space: str, memory_id: int, editor: str, content: str | None, pinned: bool | None
+    ) -> bool:
+        # Unchanged fields are left out of the SQL because D1 cannot bind None from Python.
+        text, text_params = ("?", [content]) if content is not None else ("content", [])
+        pin, pin_params = ("?", [int(pinned)]) if pinned is not None else ("pinned", [])
+        # One statement, so concurrent writers cannot push the pinned notes past their budget.
+        rows = await self._all(
+            f"UPDATE memories SET content = {text}, pinned = {pin}, updated_at = ?, updated_by = ?"
+            f" WHERE space = ? AND id = ? AND ({pin} = 0 OR LENGTH({text}) + (SELECT COALESCE(SUM(LENGTH(content)), 0)"
+            " FROM memories WHERE space = ? AND pinned = 1 AND id <> ?) <= ?) RETURNING id",
+            *text_params,
+            *pin_params,
+            datetime.now(UTC).isoformat(),
+            editor,
+            space,
+            memory_id,
+            *pin_params,
+            *text_params,
+            space,
+            memory_id,
+            MAX_PINNED_CHARS,
+        )
+        if not rows:
+            if await self._all("SELECT id FROM memories WHERE space = ? AND id = ?", space, memory_id):
+                raise PinnedFull("Pinned notes are full. Unpin or shorten something first.")
+            return False
+        if content is not None:
+            # An old vector must not keep matching text that is gone.
+            if not await self._guarded(lambda: self._add_vector(space, memory_id, content)):
+                await self._remove_vector(memory_id)
+        return True
+
+    async def overview(self, space: str) -> dict:
+        pinned = await self._all(
+            f"SELECT {_COLUMNS} FROM memories WHERE space = ? AND pinned = 1 ORDER BY id DESC LIMIT ?",
+            space,
+            MAX_PINNED_ROWS,
+        )
+        count = await self._all("SELECT COUNT(*) AS total FROM memories WHERE space = ?", space)
+        return {"total": count[0]["total"], "pinned": pinned}
+
+    async def browse(self, space: str, before_id: int | None, limit: int) -> tuple[list[dict], int | None]:
+        """Newest first. Also returns the id to continue from, if there is more."""
+        below, below_params = (" AND id < ?", [before_id]) if before_id is not None else ("", [])
+        rows = await self._all(
+            f"SELECT {_COLUMNS} FROM memories WHERE space = ?{below} ORDER BY id DESC LIMIT ?",
+            space,
+            *below_params,
+            limit + 1,
+        )
+        return rows[:limit], rows[limit - 1]["id"] if len(rows) > limit else None
 
     async def _keyword_matches(self, space: str, query: str) -> list[dict]:
         words = _search_words(query)
@@ -231,7 +300,11 @@ class Store:
 
     async def _meaning_matches(self, space: str, query: str) -> list[int]:
         matches = await self._guarded(lambda: self._semantic.query(space, query, CANDIDATES)) or []
-        return [memory_id for memory_id, score in matches if score >= MIN_SIMILARITY]
+        return [
+            int(vector_id.removeprefix(_MEMORY_VECTOR))
+            for vector_id, score in matches
+            if vector_id.startswith(_MEMORY_VECTOR) and score >= MIN_SIMILARITY
+        ]
 
     async def _rows_by_id(self, space: str, ids: list[int]) -> list[dict]:
         if not ids:
@@ -239,20 +312,13 @@ class Store:
         # Filtering on space here means a stale or wrong vector can never expose another space.
         marks = ", ".join("?" * len(ids))
         return await self._all(
-            f"SELECT id, content, source, created_at FROM memories WHERE space = ? AND id IN ({marks})",
+            f"SELECT {_COLUMNS} FROM memories WHERE space = ? AND id IN ({marks})",
             space,
             *ids,
         )
 
-    async def recall(self, space: str, query: str | None, limit: int) -> list[dict]:
-        """Newest first without a query; otherwise keyword and meaning results combined."""
-        if not (query or "").strip():
-            return await self._all(
-                "SELECT id, content, source, created_at FROM memories"
-                " WHERE space = ? ORDER BY id DESC LIMIT ?",
-                space,
-                limit,
-            )
+    async def recall(self, space: str, query: str, limit: int) -> list[dict]:
+        """Keyword and meaning results combined."""
         keyword_rows = await self._keyword_matches(space, query)
         meaning_ids = await self._meaning_matches(space, query)
 
@@ -272,5 +338,5 @@ class Store:
         )
         if not rows:
             return False
-        await self._guarded(lambda: self._semantic.remove(memory_id))
+        await self._remove_vector(memory_id)
         return True

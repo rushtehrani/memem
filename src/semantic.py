@@ -30,17 +30,17 @@ class CloudflareBackend:
         result = await self._ai.run(MODEL, _js({"text": [text]}))
         return list(_py(result.data)[0])
 
-    async def add(self, space: str, memory_id: int, text: str) -> None:
-        vector = {"id": str(memory_id), "values": await self._embed(text), "namespace": space}
+    async def add(self, space: str, vector_id: str, text: str) -> None:
+        vector = {"id": vector_id, "values": await self._embed(text), "namespace": space}
         await self._index.upsert(_js([vector]))
 
-    async def query(self, space: str, text: str, limit: int) -> list[tuple[int, float]]:
+    async def query(self, space: str, text: str, limit: int) -> list[tuple[str, float]]:
         options = {"topK": limit, "namespace": space, "returnValues": False, "returnMetadata": "none"}
         result = await self._index.query(_js(await self._embed(text)), _js(options))
-        return [(int(match.id), float(match.score)) for match in _py(result.matches)]
+        return [(str(match.id), float(match.score)) for match in _py(result.matches)]
 
-    async def remove(self, memory_id: int) -> None:
-        await self._index.deleteByIds(_js([str(memory_id)]))
+    async def remove(self, vector_id: str) -> None:
+        await self._index.deleteByIds(_js([vector_id]))
 
 
 class HttpBackend:
@@ -60,15 +60,15 @@ class HttpBackend:
             raise RuntimeError("backend failed")
         return json.loads(await reply.text())
 
-    async def add(self, space: str, memory_id: int, text: str) -> None:
-        await self._post("/add", {"space": space, "id": memory_id, "text": text})
+    async def add(self, space: str, vector_id: str, text: str) -> None:
+        await self._post("/add", {"space": space, "id": vector_id, "text": text})
 
-    async def query(self, space: str, text: str, limit: int) -> list[tuple[int, float]]:
+    async def query(self, space: str, text: str, limit: int) -> list[tuple[str, float]]:
         reply = await self._post("/query", {"space": space, "text": text, "limit": limit})
         return [(match["id"], match["score"]) for match in reply["matches"]]
 
-    async def remove(self, memory_id: int) -> None:
-        await self._post("/remove", {"id": memory_id})
+    async def remove(self, vector_id: str) -> None:
+        await self._post("/remove", {"id": vector_id})
 
 
 def from_env(env, origin: str):

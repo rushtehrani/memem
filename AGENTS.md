@@ -37,6 +37,17 @@ Tests start `pywrangler dev --env test` on a temporary local D1 database, and ne
 Workers AI, Vectorize and Google are replaced by local stand-ins, so a passing run says nothing about those real
 services. If you change how they are called, say so in your PR and check against a real deployment.
 
+## Design
+
+memem is layered, as the README roadmap shows: Sources (chats and files), then Memories, then wiki pages, then the
+pinned overview. Keep these properties as layers are added:
+
+- Sources are raw and never rewritten. Anything above them is derived and can be corrected.
+- The space is the access boundary for every layer.
+- Keep the pinned overview small. It is limited by `MAX_PINNED_CHARS`, because every chat reads it.
+- Tool descriptions state what memory is for, and only hold firm rules for consent, secrets and untrusted content.
+- Memory vectors use the id prefix `m:`. Give any new kind of searchable content its own prefix.
+
 ## Rules that protect users
 
 These are the parts of the design most easily broken by accident. Each change must preserve them.
@@ -53,7 +64,9 @@ These are the parts of the design most easily broken by accident. Each change mu
   unless the request origin is `127.0.0.1`.
 - **Recalled memories are untrusted.** Keep the "data, not instructions" notice on `recall` results. Text saved in one
   chat is read in another.
-- **Read-only connections get `recall` only**, both in `tools/list` and when a tool is called.
+- **Read-only connections get `overview` and `recall` only**, both in `tools/list` and when a tool is called.
+- **Edits record who made them.** `source` keeps the original author and `updated_by` the latest editor, both set by the
+  server, so a memory's history can't be forged through a tool.
 - **Never commit secrets**, tokens or local state such as `.wrangler/` and `.dev.vars`.
 
 ## Conventions
@@ -64,6 +77,8 @@ These are the parts of the design most easily broken by accident. Each change mu
 - **The CLI uses only the standard library**, and sends SQL through `wrangler`, so validate any value placed in that SQL.
 - **Schema changes go in a new numbered migration.** Never edit one that has been applied.
 - **D1 statements that must be atomic stay as one statement**, such as the per-space cap and token rotation.
+- **Don't bind `None` or very large integers to D1 from Python.** Leave unset values out of the SQL, and keep ids within
+  `MAX_ID`.
 - **Meaning search is optional.** A failure in Workers AI or Vectorize must not break saving or keyword search, so call
   it through `Store._guarded`.
 - **`MIN_SIMILARITY` is tied to the embedding model.** Changing the model means measuring and setting a new cutoff.
