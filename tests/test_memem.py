@@ -981,6 +981,16 @@ async def test_upload_link_tool(env):
     assert httpx.get(existing["url"], headers=cookies).status_code == 200
 
 
+@pytest.mark.anyio
+async def test_tools_describe_saving_artifacts(env):
+    async with client(env, "claude") as c:
+        tools = {tool.name: tool.description for tool in (await c.list_tools()).tools}
+    assert "artifact" in tools["get_sandbox_upload_url"]
+    assert "Only upload what the user asked to keep." in tools["get_sandbox_upload_url"]
+    assert "artifact" in tools["get_upload_link"]
+    assert "artifact" in tools["search_memories"]
+
+
 async def sandbox_url(c, **args):
     return (await call(c, "get_sandbox_upload_url", **args))["upload_url"]
 
