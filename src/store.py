@@ -2,9 +2,10 @@
 
 import hashlib
 import json
+import re
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from js import Object
 from pyodide.ffi import to_js
@@ -20,6 +21,31 @@ MAX_QUERY_WORDS = 20
 CANDIDATES = 50
 # Measured on bge-base-en-v1.5: relevant queries scored 0.55 or more, unrelated ones 0.50 or less.
 MIN_SIMILARITY = 0.52
+MAX_SIMILAR = 3
+HISTORY_DAYS = 30
+HISTORY_PREVIEW_CHARS = 500
+# Like MIN_SIMILARITY, tied to the embedding model. Measured on a small set of pairs with bge-base-en-v1.5:
+# duplicates and contradictions scored 0.73 and up, different facts on the same topic 0.66 and below.
+REVIEW_SIMILARITY = 0.72
+REVIEW_PAGE = 10  # Each memory reviewed costs one embedding and one Vectorize query.
+STALE_DAYS = 14
+
+_RELATIVE_TIME = re.compile(
+    r"\b(today|tonight|tomorrow|yesterday|this (?:week|weekend|month|year)|next (?:week|weekend|month|year)"
+    r"|last (?:week|weekend|month)|right now|currently|soon)\b",
+    re.IGNORECASE,
+)
+_FUTURE_WORDS = re.compile(
+    r"\b(will|plan|plans|planned|planning|upcoming|due|deadline|until|by|expires?|ends?|scheduled|launch(?:es)?)\b",
+    re.IGNORECASE,
+)
+_ISO_DATE = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
+_MONTHS = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
+_NAMED_DATE = re.compile(
+    r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?(?:\s+(\d{1,2})(?:st|nd|rd|th)?)?,?\s+(\d{4})\b",
+    re.IGNORECASE,
+)
+SIMILAR_PREVIEW_CHARS = 500
 RANK_CONSTANT = 60
 # Every chat reads the pinned notes first, so they must stay small.
 MAX_PINNED_CHARS = 4_000
@@ -37,6 +63,12 @@ UNUSED_CLIENT_TTL = 24 * 3600
 
 def _hash(secret: str) -> str:
     return hashlib.sha256(secret.encode()).hexdigest()
+
+
+class AlreadySaved(Exception):
+    def __init__(self, memory_id: int):
+        super().__init__("This exact memory is already saved.")
+        self.memory_id = memory_id
 
 
 class SpaceFull(Exception):
@@ -68,6 +100,51 @@ def _search_words(query: str) -> list[str]:
 def _like(word: str) -> str:
     escaped = word.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     return f"%{escaped}%"
+
+
+def _preview(memory: dict) -> dict:
+    return {
+        "id": memory["id"],
+        "content": memory["content"][:HISTORY_PREVIEW_CHARS],
+        "changed_at": memory.get("updated_at") or memory["created_at"],
+    }
+
+
+def _passed_dates(content: str, now: datetime) -> list[str]:
+    passed = []
+    for match in _ISO_DATE.finditer(content):
+        try:
+            if datetime(*map(int, match.groups()), tzinfo=UTC) + timedelta(days=1) < now:
+                passed.append(match.group(0))
+        except ValueError:
+            pass
+    for match in _NAMED_DATE.finditer(content):
+        month, day, year = _MONTHS.index(match.group(1).lower()[:3]) + 1, match.group(2), int(match.group(3))
+        try:
+            if day:
+                end = datetime(year, month, int(day), tzinfo=UTC) + timedelta(days=1)
+            else:
+                end = datetime(year + month // 12, month % 12 + 1, 1, tzinfo=UTC)
+        except ValueError:
+            continue
+        if end < now:
+            passed.append(match.group(0))
+    return passed
+
+
+def _outdated_reason(memory: dict, now: datetime) -> str | None:
+    """Why a memory may be out of date, judged only from its wording and when it last changed."""
+    content = memory["content"]
+    changed = datetime.fromisoformat(memory.get("updated_at") or memory["created_at"])
+    if changed.tzinfo is None:
+        changed = changed.replace(tzinfo=UTC)
+    relative = _RELATIVE_TIME.search(content)
+    if relative and now - changed > timedelta(days=STALE_DAYS):
+        return f"says '{relative.group(0)}' but was last changed on {changed.date().isoformat()}"
+    passed = _passed_dates(content, now)
+    if passed and _FUTURE_WORDS.search(content):
+        return f"describes a plan or deadline for {passed[0]}, which has passed"
+    return None
 
 
 class Store:
@@ -227,12 +304,17 @@ class Store:
     async def _remove_vector(self, memory_id: int) -> None:
         await self._guarded(lambda: self._semantic.remove(f"{_MEMORY_VECTOR}{memory_id}"))
 
-    async def remember(self, space: str, content: str, source: str) -> int:
-        # One statement, so concurrent writers cannot push a space past its cap.
+    async def remember(self, space: str, content: str, source: str, unique: bool = False) -> int:
+        duplicate, duplicate_params = (
+            (" AND NOT EXISTS (SELECT 1 FROM memories WHERE space = ? AND content = ?)", [space, content])
+            if unique
+            else ("", [])
+        )
+        # One statement, so concurrent writers cannot push a space past its cap or save the same memory twice.
         rows = await self._all(
             "INSERT INTO memories (space, content, source, created_at)"
             " SELECT ?, ?, ?, ?"
-            " WHERE (SELECT COUNT(*) FROM memories WHERE space = ?) < ?"
+            f" WHERE (SELECT COUNT(*) FROM memories WHERE space = ?) < ?{duplicate}"
             " RETURNING id",
             space,
             content,
@@ -240,12 +322,33 @@ class Store:
             datetime.now(UTC).isoformat(),
             space,
             MAX_MEMORIES_PER_SPACE,
+            *duplicate_params,
         )
         if not rows:
+            if unique:
+                existing = await self._all(
+                    "SELECT id FROM memories WHERE space = ? AND content = ? LIMIT 1", space, content
+                )
+                if existing:
+                    raise AlreadySaved(existing[0]["id"])
             raise SpaceFull("This memory space is full. Forget something first.")
         memory_id = rows[0]["id"]
         await self._guarded(lambda: self._add_vector(space, memory_id, content))
         return memory_id
+
+    async def similar(self, space: str, content: str, memory_id: int) -> list[dict]:
+        """Short previews of other memories close in meaning, so a new one can be merged instead of piling up."""
+        ids = [found for found in await self._meaning_matches(space, content) if found != memory_id][:MAX_SIMILAR]
+        rows = {row["id"]: row for row in await self._rows_by_id(space, ids)}
+        return [
+            {
+                "id": found,
+                "content": rows[found]["content"][:SIMILAR_PREVIEW_CHARS],
+                "created_at": rows[found]["created_at"],
+            }
+            for found in ids
+            if found in rows
+        ]
 
     async def update(
         self, space: str, memory_id: int, editor: str, content: str | None, pinned: bool | None
@@ -274,6 +377,7 @@ class Store:
             if await self._all("SELECT id FROM memories WHERE space = ? AND id = ?", space, memory_id):
                 raise PinnedFull("Pinned notes are full. Unpin or shorten something first.")
             return False
+        await self._sweep_history()
         if content is not None:
             # An old vector must not keep matching text that is gone.
             if not await self._guarded(lambda: self._add_vector(space, memory_id, content)):
@@ -502,6 +606,28 @@ class Store:
         words = _search_words(query)
         if not words:
             return []
+        return await self._ranked_keyword_matches(space, words) or await self._substring_matches(space, words)
+
+    async def _ranked_keyword_matches(self, space: str, words: list[str]) -> list[dict]:
+        """BM25 ranking, so rare words count for more than common ones, and word forms like moved and moving match."""
+        # Each word is quoted, so nothing in a query can act as full-text search syntax.
+        match = " OR ".join('"' + word.replace('"', '""') + '"' for word in words)
+        try:
+            return await self._all(
+                "SELECT m.id, m.content, m.source, m.created_at FROM memories_fts"
+                " JOIN memories m ON m.id = memories_fts.rowid"
+                " WHERE memories_fts MATCH ? AND m.space = ?"
+                " ORDER BY bm25(memories_fts), m.id DESC LIMIT ?",
+                match,
+                space,
+                CANDIDATES,
+            )
+        except Exception as err:
+            print("ranked keyword search failed:", type(err).__name__)
+            return []
+
+    async def _substring_matches(self, space: str, words: list[str]) -> list[dict]:
+        """Finds parts of words, like Prime in PrimeYou, and text the word index splits poorly, such as Chinese."""
         score = " + ".join(["(content LIKE ? ESCAPE '\\')"] * len(words))
         return await self._all(
             f"SELECT id, content, source, created_at, {score} AS score FROM memories"
@@ -512,12 +638,37 @@ class Store:
         )
 
     async def _meaning_matches(self, space: str, query: str) -> list[int]:
+        return [memory_id for memory_id, _ in await self._meaning_scores(space, query, MIN_SIMILARITY)]
+
+    async def _meaning_scores(self, space: str, query: str, cutoff: float) -> list[tuple[int, float]]:
         matches = await self._guarded(lambda: self._semantic.query(space, query, CANDIDATES)) or []
         return [
-            int(vector_id.removeprefix(_MEMORY_VECTOR))
+            (int(vector_id.removeprefix(_MEMORY_VECTOR)), score)
             for vector_id, score in matches
-            if vector_id.startswith(_MEMORY_VECTOR) and score >= MIN_SIMILARITY
+            if vector_id.startswith(_MEMORY_VECTOR) and score >= cutoff
         ]
+
+    async def review(self, space: str, before_id: int | None) -> tuple[dict, int | None]:
+        """Suggestions for tidying a page of memories: near-duplicates or contradictions, and wording that has aged."""
+        memories, more = await self.browse(space, before_id, REVIEW_PAGE)
+        pairs: dict[tuple[int, int], float] = {}
+        for memory in memories:
+            for other, score in await self._meaning_scores(space, memory["content"], REVIEW_SIMILARITY):
+                if other != memory["id"]:
+                    pair = (min(memory["id"], other), max(memory["id"], other))
+                    pairs[pair] = max(score, pairs.get(pair, 0))
+        # Filtering on space here means a stale or wrong vector can never expose another space.
+        rows = {row["id"]: row for row in await self._rows_by_id(space, sorted({i for pair in pairs for i in pair}))}
+        duplicates = [
+            {"similarity": round(score, 2), "memories": [_preview(rows[i]) for i in pair]}
+            for pair, score in sorted(pairs.items(), key=lambda item: -item[1])
+            if all(i in rows for i in pair)
+        ]
+        now = datetime.now(UTC)
+        outdated = [
+            {**_preview(memory), "reason": reason} for memory in memories if (reason := _outdated_reason(memory, now))
+        ]
+        return {"reviewed": len(memories), "possible_duplicates": duplicates, "possibly_outdated": outdated}, more
 
     async def _rows_by_id(self, space: str, ids: list[int]) -> list[dict]:
         if not ids:
@@ -545,10 +696,22 @@ class Store:
         rows = {row["id"]: row for row in await self._rows_by_id(space, best)}
         return await self._with_attachments(space, [rows[memory_id] for memory_id in best if memory_id in rows])
 
-    async def forget(self, space: str, memory_id: int) -> bool:
+    async def forget(self, space: str, memory_id: int, editor: str, forever: bool = False) -> bool:
         rows = await self._all(
             "DELETE FROM memories WHERE space = ? AND id = ? RETURNING id", space, memory_id
         )
+        if forever:
+            # Also erases earlier versions, for secrets or anything the user wants gone for good.
+            await self._all("DELETE FROM memory_versions WHERE space = ? AND memory_id = ?", space, memory_id)
+        elif rows:
+            await self._all(
+                "UPDATE memory_versions SET changed_by = ? WHERE id = (SELECT MAX(id) FROM memory_versions"
+                " WHERE space = ? AND memory_id = ? AND kind = 'delete')",
+                editor,
+                space,
+                memory_id,
+            )
+        await self._sweep_history()
         if not rows:
             return False
         await self._all(
@@ -557,3 +720,68 @@ class Store:
         await self._remove_vector(memory_id)
         await self.sweep_files()
         return True
+
+    async def _sweep_history(self) -> None:
+        cutoff = (datetime.now(UTC) - timedelta(days=HISTORY_DAYS)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        await self._all("DELETE FROM memory_versions WHERE replaced_at < ?", cutoff)
+
+    async def history(
+        self, space: str, memory_id: int | None, limit: int, before_id: int | None
+    ) -> tuple[list, int | None]:
+        """Earlier versions and deleted memories, newest first. Whole text for one memory, previews otherwise."""
+        await self._sweep_history()
+        filters, params = "", []
+        if memory_id is not None:
+            filters, params = " AND v.memory_id = ?", [memory_id]
+        if before_id is not None:
+            filters, params = f"{filters} AND v.id < ?", [*params, before_id]
+        rows = await self._all(
+            "SELECT v.id AS version_id, v.memory_id, v.kind, v.content, v.written_by, v.changed_by, v.replaced_at,"
+            " m.id IS NOT NULL AS memory_exists FROM memory_versions v"
+            " LEFT JOIN memories m ON m.id = v.memory_id AND m.space = v.space"
+            f" WHERE v.space = ?{filters} ORDER BY v.id DESC LIMIT ?",
+            space,
+            *params,
+            limit + 1,
+        )
+        more = rows[limit - 1]["version_id"] if len(rows) > limit else None
+        rows = rows[:limit]
+        for row in rows:
+            row["memory_exists"] = bool(row["memory_exists"])
+            if memory_id is None:
+                row["content"] = row["content"][:HISTORY_PREVIEW_CHARS]
+        return rows, more
+
+    async def restore(self, space: str, version_id: int, editor: str) -> int | None:
+        """Bring back an earlier version. The current text becomes history, so a restore can be undone too."""
+        await self._sweep_history()
+        versions = await self._all(
+            "SELECT memory_id, content FROM memory_versions WHERE space = ? AND id = ?", space, version_id
+        )
+        if not versions:
+            return None
+        memory_id, content = versions[0]["memory_id"], versions[0]["content"]
+        if await self.update(space, memory_id, editor, content, None):
+            return memory_id
+        # The memory was deleted, so it comes back under its old id, unpinned and without its files.
+        # Ids are never reused, so the old id cannot belong to another memory.
+        rows = await self._all(
+            "INSERT INTO memories (id, space, content, source, created_at, updated_at, updated_by, pinned)"
+            " SELECT memory_id, space, content, source, created_at, ?, ?, 0 FROM memory_versions"
+            " WHERE space = ? AND id = ? AND NOT EXISTS (SELECT 1 FROM memories WHERE id = ?)"
+            " AND (SELECT COUNT(*) FROM memories WHERE space = ?) < ?"
+            " RETURNING id",
+            datetime.now(UTC).isoformat(),
+            editor,
+            space,
+            version_id,
+            memory_id,
+            space,
+            MAX_MEMORIES_PER_SPACE,
+        )
+        if not rows:
+            if await self._all("SELECT id FROM memories WHERE id = ?", memory_id):
+                return None
+            raise SpaceFull("This memory space is full. Forget something first.")
+        await self._guarded(lambda: self._add_vector(space, memory_id, content))
+        return memory_id

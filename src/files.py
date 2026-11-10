@@ -298,7 +298,7 @@ async def _direct_upload(request, store, token: str) -> Response:
         return _json({"error": "That memory doesn't exist."}, 404)
     reply = await _stream_to_r2(request, store, memory_id, claim["name"], size)
     if reply.status != 200 and created:
-        await store.forget(claim["space"], memory_id)
+        await store.forget(claim["space"], memory_id, claim["source"], forever=True)
     return reply
 
 

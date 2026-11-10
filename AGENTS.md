@@ -69,6 +69,9 @@ These are the parts of the design most easily broken by accident. Each change mu
 - **Read-only connections get only the read tools**, both in `tools/list` and when a tool is called.
 - **Edits record who made them.** `source` keeps the original author and `updated_by` the latest editor, both set by the
   server, so a memory's history can't be forged through a tool.
+- **History is kept for 30 days, then removed.** Triggers copy every edit and deletion into `memory_versions`, and
+  `delete_memory` with `forever` erases a memory's versions too, so a secret can be removed for good. Filter every
+  history query on `space`.
 - **Attached files are opaque.** Always serve them as downloads, and require the Google session for every upload and
   download. Links alone grant access only as single-use `/files/direct/` uploads, which can add one
   file, and `/files/fetch/` downloads, which fetch one file once within two minutes. Both need a write connection.
@@ -81,12 +84,16 @@ These are the parts of the design most easily broken by accident. Each change mu
   compatibility.
 - **The CLI uses only the standard library**, and sends SQL through `wrangler`, so validate any value placed in that SQL.
 - **Schema changes go in a new numbered migration.** Never edit one that has been applied.
+- **Keyword search uses the `memories_fts` full-text index,** kept in step with `memories` by triggers. Write to
+  `memories` only, and keep every keyword query joined back to `memories` and filtered on `space`. D1 can't export a
+  database with this index: drop `memories_fts` and its triggers, export, then recreate them from migration 0007.
 - **D1 statements that must be atomic stay as one statement**, such as the per-space cap and token rotation.
 - **Don't bind `None` or very large integers to D1 from Python.** Leave unset values out of the SQL, and keep ids within
   `MAX_ID`.
 - **Meaning search is optional.** A failure in Workers AI or Vectorize must not break saving or keyword search, so call
   it through `Store._guarded`.
-- **`MIN_SIMILARITY` is tied to the embedding model.** Changing the model means measuring and setting a new cutoff.
+- **`MIN_SIMILARITY` and `REVIEW_SIMILARITY` are tied to the embedding model.** Changing the model means measuring and
+  setting new cutoffs.
 - **Tool descriptions are part of the product**, since they tell assistants how to behave. Change them deliberately.
 - **Every behavior change gets a test.** Prefer the existing end-to-end style over mocks.
 - **Update the README roadmap** when you finish or add an item.
