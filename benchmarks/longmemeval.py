@@ -1,6 +1,6 @@
 """Measure memem's search on LongMemEval, locally and for free.
 
-This runs the real Store code against SQLite, so keyword search, the cutoff and rank fusion are memem's own.
+This runs the real Store code against SQLite, so ranked keyword search, the cutoff and rank fusion are memem's own.
 Only the vector index is replaced, by exact search over the same embedding model the Worker uses.
 
 It measures retrieval only: can search find the conversation that holds the answer? Every conversation is saved
@@ -67,13 +67,6 @@ class SqliteDatabase:
     def prepare(self, sql):
         return _Statement(self._connection, sql)
 
-    def build_full_text_index(self):
-        self._connection.executescript(
-            "CREATE VIRTUAL TABLE memories_fts USING fts5(content, content='memories', content_rowid='id',"
-            " tokenize='porter unicode61');"
-            "INSERT INTO memories_fts(memories_fts) VALUES('rebuild');"
-        )
-
 
 class Embedder:
     def __init__(self):
@@ -120,24 +113,6 @@ class ExactVectors:
 class MeaningOnlyStore(memem.Store):
     async def _keyword_matches(self, space, query):
         return []
-
-
-class RankedKeywordStore(memem.Store):
-    """Tries SQLite full-text search with BM25 ranking in place of memem's word-count keyword search."""
-
-    async def _keyword_matches(self, space, query):
-        words = memem._search_words(query)
-        if not words:
-            return []
-        match = " OR ".join('"' + word.replace('"', '""') + '"' for word in words)
-        return await self._all(
-            "SELECT m.id, m.content, m.source, m.created_at FROM memories_fts"
-            " JOIN memories m ON m.id = memories_fts.rowid"
-            " WHERE memories_fts MATCH ? AND m.space = ? ORDER BY bm25(memories_fts), m.id DESC LIMIT ?",
-            match,
-            space,
-            memem.CANDIDATES,
-        )
 
 
 def chunks(session):
@@ -195,8 +170,6 @@ async def evaluate(question, embed):
     for session_id, text in sessions:
         session_of[await loader.remember(SPACE, text[:10_000], "benchmark")] = session_id
 
-    db.build_full_text_index()
-
     async def run(store, cutoff):
         memem.MIN_SIMILARITY = cutoff
         found = await store.recall(SPACE, question["question"], RESULT_LIMIT)
@@ -206,8 +179,6 @@ async def evaluate(question, embed):
     results["meaning only, cutoff 0.52"] = await run(MeaningOnlyStore(db, vectors), 0.52)
     for cutoff in CUTOFFS:
         results[f"hybrid, cutoff {cutoff:.2f}"] = await run(memem.Store(db, vectors), cutoff)
-    results["ranked keyword only"] = await run(RankedKeywordStore(db), 0.0)
-    results["ranked hybrid, cutoff 0.52"] = await run(RankedKeywordStore(db, vectors), 0.52)
     return results, len(sessions)
 
 

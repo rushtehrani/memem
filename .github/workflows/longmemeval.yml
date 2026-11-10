@@ -1,19 +1,18 @@
-name: Benchmark
+# LongMemEval retrieval benchmark: free, about 2.5 hours on 10 machines.
+# Runs only for a commit on this branch whose message contains [run longmemeval]. See benchmarks/README.md.
+name: LongMemEval
 
 on:
   push:
     branches: [longmemeval-benchmark]
   workflow_dispatch:
-    inputs:
-      questions:
-        description: Number of LongMemEval questions; 500 means all usable ones
-        default: "500"
 
 permissions:
   contents: read
 
 jobs:
   shard:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[run longmemeval]')
     runs-on: ubuntu-latest
     timeout-minutes: 350
     strategy:
@@ -25,9 +24,8 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - name: Run LongMemEval
         env:
-          QUESTIONS: ${{ inputs.questions || '500' }}
           SHARD: ${{ matrix.shard }}
-        run: uv run --no-project --python 3.12 --with fastembed --with numpy python benchmarks/longmemeval.py --questions "$QUESTIONS" --shard "$SHARD" --shards 10
+        run: uv run --no-project --python 3.12 --with fastembed --with numpy python benchmarks/longmemeval.py --questions 500 --shard "$SHARD" --shards 10
       - uses: actions/upload-artifact@v4
         with:
           name: rows-${{ matrix.shard }}
@@ -36,7 +34,7 @@ jobs:
 
   merge:
     needs: shard
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && (github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[run longmemeval]')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

@@ -1,0 +1,84 @@
+# LoCoMo end-to-end benchmark: Claude Haiku 5.5 saves memories with memem's tools, then answers from them.
+# Costs about $3.60 in Anthropic API usage for both versions on all 10 conversations, paid by the
+# ANTHROPIC_API_KEY repository secret. Runs only for a commit on this branch whose message contains
+# [run locomo]. See benchmarks/README.md.
+name: LoCoMo
+
+on:
+  push:
+    branches: [longmemeval-benchmark]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: locomo
+  cancel-in-progress: false
+
+env:
+  # main just before the accuracy work: save rules, duplicate checks, ranked search and search-again guidance.
+  BASELINE_REF: b2facc7
+
+jobs:
+  conversation:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[run locomo]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      max-parallel: 10
+      matrix:
+        version: [current, baseline]
+        conversation: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v5
+      - name: Check the API key is set
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "Add an ANTHROPIC_API_KEY repository secret first." >&2
+            exit 1
+          fi
+      - name: Check out the baseline version
+        if: matrix.version == 'baseline'
+        run: git worktree add ../baseline "$BASELINE_REF"
+      - name: Run LoCoMo
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          VERSION: ${{ matrix.version }}
+          CONVERSATION: ${{ matrix.conversation }}
+        run: |
+          if [ "$VERSION" = baseline ]; then code=../baseline; else code=.; fi
+          uv run --no-project --python 3.12 --with anthropic --with fastembed --with numpy python benchmarks/locomo.py \
+            --conversations "$CONVERSATION" --label "$VERSION" --src "$code/src" --migrations "$code/migrations"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: locomo-${{ matrix.version }}-${{ matrix.conversation }}
+          path: .benchmark/locomo/results-*.json
+          include-hidden-files: true
+
+  merge:
+    needs: conversation
+    if: ${{ !cancelled() && (github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[run locomo]')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: locomo-*
+          path: .benchmark/locomo
+          merge-multiple: true
+      - name: Compare versions
+        run: uv run --no-project --python 3.12 --with numpy python benchmarks/locomo.py --merge
+      - uses: actions/upload-artifact@v4
+        with:
+          name: locomo-comparison
+          path: .benchmark/locomo/comparison.json
+          include-hidden-files: true
