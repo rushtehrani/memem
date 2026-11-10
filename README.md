@@ -140,6 +140,7 @@ Files             attached to memories, stored whole
 - [x] `search_memories`, `list_memories`, `add_memory`, `update_memory` and `delete_memory` tools over MCP
 - [x] Search by meaning and keyword, combined
 - [x] Fall back to keyword search if meaning search fails
+- [x] Rank keyword matches so rare words count more and word forms match, with substring search as a fallback
 - [x] Revise outdated memories in place, recording which connection changed them
 - [x] Browse a whole space, page by page
 - [x] Tool descriptions state the purpose of memory rather than strict rules

@@ -536,6 +536,28 @@ class Store:
         words = _search_words(query)
         if not words:
             return []
+        return await self._ranked_keyword_matches(space, words) or await self._substring_matches(space, words)
+
+    async def _ranked_keyword_matches(self, space: str, words: list[str]) -> list[dict]:
+        """BM25 ranking, so rare words count for more than common ones, and word forms like moved and moving match."""
+        # Each word is quoted, so nothing in a query can act as full-text search syntax.
+        match = " OR ".join('"' + word.replace('"', '""') + '"' for word in words)
+        try:
+            return await self._all(
+                "SELECT m.id, m.content, m.source, m.created_at FROM memories_fts"
+                " JOIN memories m ON m.id = memories_fts.rowid"
+                " WHERE memories_fts MATCH ? AND m.space = ?"
+                " ORDER BY bm25(memories_fts), m.id DESC LIMIT ?",
+                match,
+                space,
+                CANDIDATES,
+            )
+        except Exception as err:
+            print("ranked keyword search failed:", type(err).__name__)
+            return []
+
+    async def _substring_matches(self, space: str, words: list[str]) -> list[dict]:
+        """Finds parts of words, like Prime in PrimeYou, and text the word index splits poorly, such as Chinese."""
         score = " + ".join(["(content LIKE ? ESCAPE '\\')"] * len(words))
         return await self._all(
             f"SELECT id, content, source, created_at, {score} AS score FROM memories"

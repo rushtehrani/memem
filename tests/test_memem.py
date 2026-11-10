@@ -536,10 +536,11 @@ def test_no_plaintext_tokens_at_rest(env):
 @pytest.mark.anyio
 async def test_like_wildcards_are_literal(env):
     async with client(env, "personal") as c:
-        await call(c, "add_memory", content="discount is 50% today")
-        await call(c, "add_memory", content="discount is 50 dollars")
-        found = await call(c, "search_memories", query="50%")
-    assert [m["content"] for m in found["memories"]] == ["discount is 50% today"]
+        # Parts of words, so this goes through the substring fallback, where % must not act as a wildcard.
+        await call(c, "add_memory", content="code pre50%postzxg")
+        await call(c, "add_memory", content="code pre50xpostzxg")
+        found = await call(c, "search_memories", query="50%post")
+    assert [m["content"] for m in found["memories"]] == ["code pre50%postzxg"]
 
 
 def test_cli_rejects_bad_input_and_duplicates(env):
@@ -731,6 +732,66 @@ async def test_saving_guidance_asks_for_lasting_wording(env):
     assert "real dates" in tools["add_memory"] and "changed from" in tools["add_memory"]
     assert "changed from" in tools["update_memory"]
     assert "Only save what the user asked" in tools["add_memory"]
+
+
+@pytest.mark.anyio
+async def test_keyword_search_matches_word_forms(env):
+    async with client(env, "claude") as c:
+        saved = await call(c, "add_memory", content="zxa team relocated the office")
+        found = await call(c, "search_memories", query="relocating")
+    assert saved["id"] in [m["id"] for m in found["memories"]]
+
+
+@pytest.mark.anyio
+async def test_keyword_search_ranks_rare_words_first(env):
+    async with client(env, "chatgpt") as c:
+        rare = await call(c, "add_memory", content="kumquatzxb tasting")
+        for i in range(10):
+            await call(c, "add_memory", content=f"commonzxb filler {i}")
+        # Newer and matching one word twice, so counting words alone would put it first.
+        common = await call(c, "add_memory", content="commonzxb commonzxb review")
+        found = await call(c, "search_memories", query="commonzxb kumquatzxb")
+    ids = [m["id"] for m in found["memories"]]
+    assert ids.index(rare["id"]) < ids.index(common["id"])
+
+
+@pytest.mark.anyio
+async def test_keyword_search_falls_back_to_parts_of_words(env):
+    async with client(env, "claude") as c:
+        saved = await call(c, "add_memory", content="zxc PrimeYouzxc launch plan")
+        found = await call(c, "search_memories", query="PrimeYou")
+    assert saved["id"] in [m["id"] for m in found["memories"]]
+
+
+@pytest.mark.anyio
+async def test_keyword_index_follows_edits_and_deletes(env):
+    async with client(env, "claude") as c:
+        edited = await call(c, "add_memory", content="zxd relocated abroad")
+        await call(c, "update_memory", id=edited["id"], content="zxd stayed home")
+        deleted = await call(c, "add_memory", content="zxd emigrated abroad")
+        await call(c, "delete_memory", id=deleted["id"])
+        old_word = await call(c, "search_memories", query="relocating")
+        new_word = await call(c, "search_memories", query="staying")
+        gone = await call(c, "search_memories", query="emigrating")
+    assert edited["id"] not in [m["id"] for m in old_word["memories"]]
+    assert edited["id"] in [m["id"] for m in new_word["memories"]]
+    assert deleted["id"] not in [m["id"] for m in gone["memories"]]
+
+
+@pytest.mark.anyio
+async def test_ranked_keyword_search_stays_in_its_space(env):
+    async with client(env, "claude") as work, client(env, "personal") as home:
+        await call(work, "add_memory", content="zxe confidential merger negotiated")
+        found = await call(home, "search_memories", query="negotiating merger")
+    assert all("zxe" not in m["content"] for m in found["memories"])
+
+
+@pytest.mark.anyio
+async def test_search_syntax_in_queries_is_treated_as_words(env):
+    async with client(env, "claude") as c:
+        saved = await call(c, "add_memory", content='zxf quoted "NEAR" OR AND notes')
+        found = await call(c, "search_memories", query='zxf" OR NEAR( * ^col:')
+    assert saved["id"] in [m["id"] for m in found["memories"]]
 
 
 def by_id(found, memory_id):
