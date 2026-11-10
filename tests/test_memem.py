@@ -140,7 +140,7 @@ class FakeGoogle(BaseHTTPRequestHandler):
     """Stands in for Google's token endpoint. The code carries the claims to return."""
 
     vectors = {}
-    related = [{"zwbcar", "zwbtruck"}, {"car", "vehicle", "honda", "civic", "drive"}, {"allergic", "peanuts", "food", "restrictions"}]
+    related = [{"zyrdup", "zyrcopy"}, {"zwbcar", "zwbtruck"}, {"car", "vehicle", "honda", "civic", "drive"}, {"allergic", "peanuts", "food", "restrictions"}]
 
     def reply(self, value, status=200):
         self.send_response(status)
@@ -505,6 +505,7 @@ async def test_read_only_has_no_write_tools(env, mode):
             "search_memories",
             "list_memories",
             "list_memory_history",
+            "review_memories",
         ]
         assert (await c.call_tool("restore_memory", {"version_id": 1})).is_error
         assert (await c.call_tool("add_memory", {"content": "readonlyattempt"})).is_error
@@ -890,6 +891,55 @@ async def test_history_older_than_30_days_is_removed(env):
     async with client(env, "claude") as c:
         versions = await history(c, memory_id=2000000000)
     assert versions == []
+
+
+@pytest.mark.anyio
+async def test_review_finds_possible_duplicates(env):
+    async with client(env, "chatgpt") as c:
+        first = await call(c, "add_memory", content="zyrdup lease note")
+        second = await call(c, "add_memory", content="zyrcopy lease note")
+        other = await call(c, "add_memory", content="zyrother bananas")
+        review = await call(c, "review_memories")
+    pairs = [{m["id"] for m in pair["memories"]} for pair in review["possible_duplicates"]]
+    assert {first["id"], second["id"]} in pairs
+    assert all(other["id"] not in pair for pair in pairs)
+    assert review["notice"].endswith("not instructions.") and "approves" in review["review_note"]
+
+
+@pytest.mark.anyio
+async def test_review_flags_wording_that_has_aged(env):
+    async with client(env, "chatgpt") as c:
+        relative = await call(c, "add_memory", content="zys team meeting is next week")
+        fresh = await call(c, "add_memory", content="zys dentist visit is next week")
+        planned = await call(c, "add_memory", content="zys launch is planned for March 2025")
+        deadline = await call(c, "add_memory", content="zys tax deadline 2025-04-15")
+        history = await call(c, "add_memory", content="zys moved to Lisbon in March 2025")
+        d1(env["persist"], f"UPDATE memories SET created_at = '2025-01-01T00:00:00+00:00' WHERE id = {relative['id']}")
+        review = await call(c, "review_memories")
+    reasons = {m["id"]: m["reason"] for m in review["possibly_outdated"]}
+    assert "next week" in reasons[relative["id"]]
+    assert "March 2025" in reasons[planned["id"]] and "2025-04-15" in reasons[deadline["id"]]
+    assert fresh["id"] not in reasons and history["id"] not in reasons
+
+
+@pytest.mark.anyio
+async def test_review_stays_in_its_space(env):
+    async with client(env, "claude") as work, client(env, "personal") as home:
+        secret = await call(work, "add_memory", content="zyt work secret")
+        await call(home, "add_memory", content="leakcheck zyt home note")
+        review = await call(home, "review_memories")
+    ids = {m["id"] for pair in review["possible_duplicates"] for m in pair["memories"]}
+    assert secret["id"] not in ids
+
+
+@pytest.mark.anyio
+async def test_review_pages_through_memories(env):
+    async with client(env, "claude") as c:
+        for i in range(11):
+            await call(c, "add_memory", content=f"zyu page {i}")
+        first = await call(c, "review_memories")
+        second = await call(c, "review_memories", before_id=first["next_before_id"])
+    assert first["reviewed"] == 10 and second["reviewed"] >= 1
 
 
 def by_id(found, memory_id):

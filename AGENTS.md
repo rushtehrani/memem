@@ -92,7 +92,8 @@ These are the parts of the design most easily broken by accident. Each change mu
   `MAX_ID`.
 - **Meaning search is optional.** A failure in Workers AI or Vectorize must not break saving or keyword search, so call
   it through `Store._guarded`.
-- **`MIN_SIMILARITY` is tied to the embedding model.** Changing the model means measuring and setting a new cutoff.
+- **`MIN_SIMILARITY` and `REVIEW_SIMILARITY` are tied to the embedding model.** Changing the model means measuring and
+  setting new cutoffs.
 - **Tool descriptions are part of the product**, since they tell assistants how to behave. Change them deliberately.
 - **Every behavior change gets a test.** Prefer the existing end-to-end style over mocks.
 - **Update the README roadmap** when you finish or add an item.

@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import re
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -23,6 +24,27 @@ MIN_SIMILARITY = 0.52
 MAX_SIMILAR = 3
 HISTORY_DAYS = 30
 HISTORY_PREVIEW_CHARS = 500
+# Like MIN_SIMILARITY, tied to the embedding model. Measured on a small set of pairs with bge-base-en-v1.5:
+# duplicates and contradictions scored 0.73 and up, different facts on the same topic 0.66 and below.
+REVIEW_SIMILARITY = 0.72
+REVIEW_PAGE = 10  # Each memory reviewed costs one embedding and one Vectorize query.
+STALE_DAYS = 14
+
+_RELATIVE_TIME = re.compile(
+    r"\b(today|tonight|tomorrow|yesterday|this (?:week|weekend|month|year)|next (?:week|weekend|month|year)"
+    r"|last (?:week|weekend|month)|right now|currently|soon)\b",
+    re.IGNORECASE,
+)
+_FUTURE_WORDS = re.compile(
+    r"\b(will|plan|plans|planned|planning|upcoming|due|deadline|until|by|expires?|ends?|scheduled|launch(?:es)?)\b",
+    re.IGNORECASE,
+)
+_ISO_DATE = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
+_MONTHS = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
+_NAMED_DATE = re.compile(
+    r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?(?:\s+(\d{1,2})(?:st|nd|rd|th)?)?,?\s+(\d{4})\b",
+    re.IGNORECASE,
+)
 SIMILAR_PREVIEW_CHARS = 500
 RANK_CONSTANT = 60
 # Every chat reads the pinned notes first, so they must stay small.
@@ -78,6 +100,51 @@ def _search_words(query: str) -> list[str]:
 def _like(word: str) -> str:
     escaped = word.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     return f"%{escaped}%"
+
+
+def _preview(memory: dict) -> dict:
+    return {
+        "id": memory["id"],
+        "content": memory["content"][:HISTORY_PREVIEW_CHARS],
+        "changed_at": memory.get("updated_at") or memory["created_at"],
+    }
+
+
+def _passed_dates(content: str, now: datetime) -> list[str]:
+    passed = []
+    for match in _ISO_DATE.finditer(content):
+        try:
+            if datetime(*map(int, match.groups()), tzinfo=UTC) + timedelta(days=1) < now:
+                passed.append(match.group(0))
+        except ValueError:
+            pass
+    for match in _NAMED_DATE.finditer(content):
+        month, day, year = _MONTHS.index(match.group(1).lower()[:3]) + 1, match.group(2), int(match.group(3))
+        try:
+            if day:
+                end = datetime(year, month, int(day), tzinfo=UTC) + timedelta(days=1)
+            else:
+                end = datetime(year + month // 12, month % 12 + 1, 1, tzinfo=UTC)
+        except ValueError:
+            continue
+        if end < now:
+            passed.append(match.group(0))
+    return passed
+
+
+def _outdated_reason(memory: dict, now: datetime) -> str | None:
+    """Why a memory may be out of date, judged only from its wording and when it last changed."""
+    content = memory["content"]
+    changed = datetime.fromisoformat(memory.get("updated_at") or memory["created_at"])
+    if changed.tzinfo is None:
+        changed = changed.replace(tzinfo=UTC)
+    relative = _RELATIVE_TIME.search(content)
+    if relative and now - changed > timedelta(days=STALE_DAYS):
+        return f"says '{relative.group(0)}' but was last changed on {changed.date().isoformat()}"
+    passed = _passed_dates(content, now)
+    if passed and _FUTURE_WORDS.search(content):
+        return f"describes a plan or deadline for {passed[0]}, which has passed"
+    return None
 
 
 class Store:
@@ -571,12 +638,37 @@ class Store:
         )
 
     async def _meaning_matches(self, space: str, query: str) -> list[int]:
+        return [memory_id for memory_id, _ in await self._meaning_scores(space, query, MIN_SIMILARITY)]
+
+    async def _meaning_scores(self, space: str, query: str, cutoff: float) -> list[tuple[int, float]]:
         matches = await self._guarded(lambda: self._semantic.query(space, query, CANDIDATES)) or []
         return [
-            int(vector_id.removeprefix(_MEMORY_VECTOR))
+            (int(vector_id.removeprefix(_MEMORY_VECTOR)), score)
             for vector_id, score in matches
-            if vector_id.startswith(_MEMORY_VECTOR) and score >= MIN_SIMILARITY
+            if vector_id.startswith(_MEMORY_VECTOR) and score >= cutoff
         ]
+
+    async def review(self, space: str, before_id: int | None) -> tuple[dict, int | None]:
+        """Suggestions for tidying a page of memories: near-duplicates or contradictions, and wording that has aged."""
+        memories, more = await self.browse(space, before_id, REVIEW_PAGE)
+        pairs: dict[tuple[int, int], float] = {}
+        for memory in memories:
+            for other, score in await self._meaning_scores(space, memory["content"], REVIEW_SIMILARITY):
+                if other != memory["id"]:
+                    pair = (min(memory["id"], other), max(memory["id"], other))
+                    pairs[pair] = max(score, pairs.get(pair, 0))
+        # Filtering on space here means a stale or wrong vector can never expose another space.
+        rows = {row["id"]: row for row in await self._rows_by_id(space, sorted({i for pair in pairs for i in pair}))}
+        duplicates = [
+            {"similarity": round(score, 2), "memories": [_preview(rows[i]) for i in pair]}
+            for pair, score in sorted(pairs.items(), key=lambda item: -item[1])
+            if all(i in rows for i in pair)
+        ]
+        now = datetime.now(UTC)
+        outdated = [
+            {**_preview(memory), "reason": reason} for memory in memories if (reason := _outdated_reason(memory, now))
+        ]
+        return {"reviewed": len(memories), "possible_duplicates": duplicates, "possibly_outdated": outdated}, more
 
     async def _rows_by_id(self, space: str, ids: list[int]) -> list[dict]:
         if not ids:

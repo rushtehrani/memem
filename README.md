@@ -1,7 +1,7 @@
 # memem
 
 One small memory server you can attach to Claude, ChatGPT and Gemini.
-It speaks MCP and exposes eleven tools: `get_memory_overview`, `search_memories`, `list_memories`, `list_memory_history`, `add_memory`, `update_memory`, `delete_memory`, `restore_memory`,
+It speaks MCP and exposes twelve tools: `get_memory_overview`, `search_memories`, `list_memories`, `list_memory_history`, `review_memories`, `add_memory`, `update_memory`, `delete_memory`, `restore_memory`,
 `get_upload_link`, `get_sandbox_upload_url` and `get_sandbox_download_url`.
 
 It runs as a Cloudflare Worker in Python, with a D1 database and R2 for attached files. Needs [uv](https://docs.astral.sh/uv/),
@@ -52,7 +52,7 @@ The app opens an approval page, where you pick a memory space, optionally choose
 | Gemini | Settings > Connected Apps > Custom apps > Add a custom app, then paste the address | Google's help page describes no per-chat switch, so consider a read-only connection or its own space. Type `@` to direct a prompt to it |
 
 Plan limits apply and change over time. ChatGPT may limit write tools on some plans, in which case only the read tools
-(`get_memory_overview`, `search_memories`, `list_memories` and `list_memory_history`) may work there. Google limits custom apps in the Gemini app to personal accounts in
+(`get_memory_overview`, `search_memories`, `list_memories`, `list_memory_history` and `review_memories`) may work there. Google limits custom apps in the Gemini app to personal accounts in
 the US with Keep Activity on. Other developers have reported Gemini's sign-in failing on Google's side.
 
 ## Saving and retrieving files
@@ -79,7 +79,8 @@ settings.
 
 - A chat without the connector turned on has no access at all.
 - A connection reaches exactly one space, chosen on the approval page. Reconnect to change it.
-- Read-only connections get `get_memory_overview`, `search_memories`, `list_memories` and `list_memory_history` only.
+- Read-only connections get `get_memory_overview`, `search_memories`, `list_memories`, `list_memory_history` and
+  `review_memories` only.
 
 ```bash
 uv run memem list
@@ -163,7 +164,8 @@ Files are attachments on memories. See [the design](docs/file-sharing-design.md)
 
 ### Dreaming
 
-- [ ] Guided tidy-up, where an assistant reviews a space and corrects or merges memories
+- [x] Guided tidy-up: `review_memories` finds likely duplicates, contradictions and aged wording, and the assistant
+  proposes changes for the user to approve
 - [ ] Scheduled dreaming that proposes merges, flags stale or conflicting memories, and suggests what to pin, with protection against injected instructions
 
 ### Guides and skills
