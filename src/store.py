@@ -4,7 +4,7 @@ import hashlib
 import json
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from js import Object
 from pyodide.ffi import to_js
@@ -21,6 +21,8 @@ CANDIDATES = 50
 # Measured on bge-base-en-v1.5: relevant queries scored 0.55 or more, unrelated ones 0.50 or less.
 MIN_SIMILARITY = 0.52
 MAX_SIMILAR = 3
+HISTORY_DAYS = 30
+HISTORY_PREVIEW_CHARS = 500
 SIMILAR_PREVIEW_CHARS = 500
 RANK_CONSTANT = 60
 # Every chat reads the pinned notes first, so they must stay small.
@@ -308,6 +310,7 @@ class Store:
             if await self._all("SELECT id FROM memories WHERE space = ? AND id = ?", space, memory_id):
                 raise PinnedFull("Pinned notes are full. Unpin or shorten something first.")
             return False
+        await self._sweep_history()
         if content is not None:
             # An old vector must not keep matching text that is gone.
             if not await self._guarded(lambda: self._add_vector(space, memory_id, content)):
@@ -601,10 +604,22 @@ class Store:
         rows = {row["id"]: row for row in await self._rows_by_id(space, best)}
         return await self._with_attachments(space, [rows[memory_id] for memory_id in best if memory_id in rows])
 
-    async def forget(self, space: str, memory_id: int) -> bool:
+    async def forget(self, space: str, memory_id: int, editor: str, forever: bool = False) -> bool:
         rows = await self._all(
             "DELETE FROM memories WHERE space = ? AND id = ? RETURNING id", space, memory_id
         )
+        if forever:
+            # Also erases earlier versions, for secrets or anything the user wants gone for good.
+            await self._all("DELETE FROM memory_versions WHERE space = ? AND memory_id = ?", space, memory_id)
+        elif rows:
+            await self._all(
+                "UPDATE memory_versions SET changed_by = ? WHERE id = (SELECT MAX(id) FROM memory_versions"
+                " WHERE space = ? AND memory_id = ? AND kind = 'delete')",
+                editor,
+                space,
+                memory_id,
+            )
+        await self._sweep_history()
         if not rows:
             return False
         await self._all(
@@ -613,3 +628,68 @@ class Store:
         await self._remove_vector(memory_id)
         await self.sweep_files()
         return True
+
+    async def _sweep_history(self) -> None:
+        cutoff = (datetime.now(UTC) - timedelta(days=HISTORY_DAYS)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        await self._all("DELETE FROM memory_versions WHERE replaced_at < ?", cutoff)
+
+    async def history(
+        self, space: str, memory_id: int | None, limit: int, before_id: int | None
+    ) -> tuple[list, int | None]:
+        """Earlier versions and deleted memories, newest first. Whole text for one memory, previews otherwise."""
+        await self._sweep_history()
+        filters, params = "", []
+        if memory_id is not None:
+            filters, params = " AND v.memory_id = ?", [memory_id]
+        if before_id is not None:
+            filters, params = f"{filters} AND v.id < ?", [*params, before_id]
+        rows = await self._all(
+            "SELECT v.id AS version_id, v.memory_id, v.kind, v.content, v.written_by, v.changed_by, v.replaced_at,"
+            " m.id IS NOT NULL AS memory_exists FROM memory_versions v"
+            " LEFT JOIN memories m ON m.id = v.memory_id AND m.space = v.space"
+            f" WHERE v.space = ?{filters} ORDER BY v.id DESC LIMIT ?",
+            space,
+            *params,
+            limit + 1,
+        )
+        more = rows[limit - 1]["version_id"] if len(rows) > limit else None
+        rows = rows[:limit]
+        for row in rows:
+            row["memory_exists"] = bool(row["memory_exists"])
+            if memory_id is None:
+                row["content"] = row["content"][:HISTORY_PREVIEW_CHARS]
+        return rows, more
+
+    async def restore(self, space: str, version_id: int, editor: str) -> int | None:
+        """Bring back an earlier version. The current text becomes history, so a restore can be undone too."""
+        await self._sweep_history()
+        versions = await self._all(
+            "SELECT memory_id, content FROM memory_versions WHERE space = ? AND id = ?", space, version_id
+        )
+        if not versions:
+            return None
+        memory_id, content = versions[0]["memory_id"], versions[0]["content"]
+        if await self.update(space, memory_id, editor, content, None):
+            return memory_id
+        # The memory was deleted, so it comes back under its old id, unpinned and without its files.
+        # Ids are never reused, so the old id cannot belong to another memory.
+        rows = await self._all(
+            "INSERT INTO memories (id, space, content, source, created_at, updated_at, updated_by, pinned)"
+            " SELECT memory_id, space, content, source, created_at, ?, ?, 0 FROM memory_versions"
+            " WHERE space = ? AND id = ? AND NOT EXISTS (SELECT 1 FROM memories WHERE id = ?)"
+            " AND (SELECT COUNT(*) FROM memories WHERE space = ?) < ?"
+            " RETURNING id",
+            datetime.now(UTC).isoformat(),
+            editor,
+            space,
+            version_id,
+            memory_id,
+            space,
+            MAX_MEMORIES_PER_SPACE,
+        )
+        if not rows:
+            if await self._all("SELECT id FROM memories WHERE id = ?", memory_id):
+                return None
+            raise SpaceFull("This memory space is full. Forget something first.")
+        await self._guarded(lambda: self._add_vector(space, memory_id, content))
+        return memory_id

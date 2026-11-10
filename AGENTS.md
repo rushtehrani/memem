@@ -69,6 +69,9 @@ These are the parts of the design most easily broken by accident. Each change mu
 - **Read-only connections get only the read tools**, both in `tools/list` and when a tool is called.
 - **Edits record who made them.** `source` keeps the original author and `updated_by` the latest editor, both set by the
   server, so a memory's history can't be forged through a tool.
+- **History is kept for 30 days, then removed.** Triggers copy every edit and deletion into `memory_versions`, and
+  `delete_memory` with `forever` erases a memory's versions too, so a secret can be removed for good. Filter every
+  history query on `space`.
 - **Attached files are opaque.** Always serve them as downloads, and require the Google session for every upload and
   download. Links alone grant access only as single-use `/files/direct/` uploads, which can add one
   file, and `/files/fetch/` downloads, which fetch one file once within two minutes. Both need a write connection.

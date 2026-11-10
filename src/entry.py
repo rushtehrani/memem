@@ -127,10 +127,15 @@ UPDATE_MEMORY = {
 }
 DELETE_MEMORY = {
     "name": "delete_memory",
-    "description": "Delete one memory by id, and any files attached to it, when the user asks for it to be removed.",
+    "description": (
+        "Delete one memory by id, and any files attached to it, when the user asks for it to be removed. Its text "
+        "can be restored for 30 days. Pass forever to also erase its earlier versions, for a secret or anything the "
+        "user wants gone for good. To erase a secret that was edited out of a memory, delete it forever and save "
+        "the cleaned text again."
+    ),
     "inputSchema": {
         "type": "object",
-        "properties": {"id": {"type": "integer", "minimum": 1}},
+        "properties": {"id": {"type": "integer", "minimum": 1}, "forever": {"type": "boolean", "default": False}},
         "required": ["id"],
     },
     "annotations": {"readOnlyHint": False, "destructiveHint": True},
@@ -183,8 +188,47 @@ GET_SANDBOX_DOWNLOAD_URL = {
     },
     "annotations": {"readOnlyHint": False, "destructiveHint": False},
 }
-READ_TOOLS = [GET_MEMORY_OVERVIEW, SEARCH_MEMORIES, LIST_MEMORIES]
-WRITE_TOOLS = [ADD_MEMORY, UPDATE_MEMORY, DELETE_MEMORY, GET_UPLOAD_LINK, GET_SANDBOX_UPLOAD_URL, GET_SANDBOX_DOWNLOAD_URL]
+LIST_MEMORY_HISTORY = {
+    "name": "list_memory_history",
+    "description": (
+        "List earlier versions of memories and memories deleted in the last 30 days, newest first, so a mistaken "
+        "edit, merge or deletion can be undone with restore_memory. Pass memory_id for one memory's versions in "
+        f"full; otherwise texts are shortened. {NOT_INSTRUCTIONS}"
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "memory_id": {"type": "integer", "minimum": 1},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
+            "before_id": {"type": "integer", "minimum": 1, "description": "Continue below this version id"},
+        },
+    },
+    "annotations": {"readOnlyHint": True},
+}
+RESTORE_MEMORY = {
+    "name": "restore_memory",
+    "description": (
+        "Bring back an earlier version, or a deleted memory, by its version_id from list_memory_history, when the "
+        "user wants a change undone. The text it replaces is kept, so a restore can be undone too. A deleted memory "
+        "comes back unpinned and without its files."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {"version_id": {"type": "integer", "minimum": 1}},
+        "required": ["version_id"],
+    },
+    "annotations": {"readOnlyHint": False, "destructiveHint": False},
+}
+READ_TOOLS = [GET_MEMORY_OVERVIEW, SEARCH_MEMORIES, LIST_MEMORIES, LIST_MEMORY_HISTORY]
+WRITE_TOOLS = [
+    ADD_MEMORY,
+    UPDATE_MEMORY,
+    DELETE_MEMORY,
+    RESTORE_MEMORY,
+    GET_UPLOAD_LINK,
+    GET_SANDBOX_UPLOAD_URL,
+    GET_SANDBOX_DOWNLOAD_URL,
+]
 
 
 class InvalidArguments(Exception):
@@ -247,6 +291,16 @@ async def _update(store: Store, conn: Connection, args: dict) -> dict:
     return {"updated": await store.update(conn.space, memory_id, conn.label, content, pinned)}
 
 
+async def _history(store: Store, conn: Connection, args: dict) -> dict:
+    memory_id = _int(args, "memory_id", None, 1, MAX_ID) if "memory_id" in args else None
+    before_id = _int(args, "before_id", None, 1, MAX_ID) if "before_id" in args else None
+    versions, more = await store.history(conn.space, memory_id, _int(args, "limit", 20, 1, 100), before_id)
+    result = {"notice": DATA_NOTICE, "versions": versions}
+    if more is not None:
+        result["next_before_id"] = more
+    return result
+
+
 async def _add(store: Store, conn: Connection, content: str) -> dict:
     try:
         memory_id = await store.remember(conn.space, content, conn.label, unique=True)
@@ -283,6 +337,8 @@ async def _run_tool(store: Store, conn: Connection, name: str, args: dict) -> di
         return await _search(store, conn, args)
     if name == "list_memories":
         return await _list(store, conn, args)
+    if name == "list_memory_history":
+        return await _history(store, conn, args)
     if name == "add_memory" and conn.can_write:
         content = args.get("content")
         if not _valid_content(content):
@@ -304,7 +360,13 @@ async def _run_tool(store: Store, conn: Connection, name: str, args: dict) -> di
         return link
     if name == "delete_memory" and conn.can_write:
         memory_id = _int(args, "id", None, 1, MAX_ID)
-        return {"deleted": await store.forget(conn.space, memory_id)}
+        forever = args.get("forever", False)
+        if not isinstance(forever, bool):
+            raise InvalidArguments
+        return {"deleted": await store.forget(conn.space, memory_id, conn.label, forever)}
+    if name == "restore_memory" and conn.can_write:
+        memory_id = await store.restore(conn.space, _int(args, "version_id", None, 1, MAX_ID), conn.label)
+        return {"restored": memory_id is not None, **({"id": memory_id} if memory_id else {})}
     raise LookupError
 
 

@@ -500,7 +500,13 @@ async def test_spaces_are_isolated(env, mode):
 @pytest.mark.anyio
 async def test_read_only_has_no_write_tools(env, mode):
     async with client(env, "reader", mode) as c:
-        assert [t.name for t in (await c.list_tools()).tools] == ["get_memory_overview", "search_memories", "list_memories"]
+        assert [t.name for t in (await c.list_tools()).tools] == [
+            "get_memory_overview",
+            "search_memories",
+            "list_memories",
+            "list_memory_history",
+        ]
+        assert (await c.call_tool("restore_memory", {"version_id": 1})).is_error
         assert (await c.call_tool("add_memory", {"content": "readonlyattempt"})).is_error
         assert (await c.call_tool("update_memory", {"id": 1, "content": "readonlyattempt"})).is_error
         assert (await call(c, "search_memories", query="readonlyattempt"))["memories"] == []
@@ -804,6 +810,86 @@ async def test_empty_searches_suggest_trying_other_words(env):
     assert empty["memories"] == [] and "different words" in empty["search_tip"]
     assert saved["id"] in [m["id"] for m in found["memories"]] and "search_tip" not in found
     assert "search again" in tools["search_memories"]
+
+
+async def history(c, **args):
+    return (await call(c, "list_memory_history", **args))["versions"]
+
+
+@pytest.mark.anyio
+async def test_edits_are_kept_and_can_be_restored(env):
+    async with client(env, "claude") as c:
+        saved = await call(c, "add_memory", content="zya plan is lunch on Friday")
+        await call(c, "update_memory", id=saved["id"], content="zya plan is dinner on Friday")
+        await call(c, "update_memory", id=saved["id"], pinned=True)
+        versions = await history(c, memory_id=saved["id"])
+        restored = await call(c, "restore_memory", version_id=versions[0]["version_id"])
+        current = await call(c, "search_memories", query="zya")
+        after = await history(c, memory_id=saved["id"])
+    assert [(v["kind"], v["content"]) for v in versions] == [("edit", "zya plan is lunch on Friday")]
+    assert versions[0]["written_by"].startswith("claude-") and versions[0]["changed_by"].startswith("claude-")
+    assert versions[0]["memory_exists"] is True
+    assert restored == {"restored": True, "id": saved["id"]}
+    assert by_id(current, saved["id"])["content"] == "zya plan is lunch on Friday"
+    assert [v["content"] for v in after] == ["zya plan is dinner on Friday", "zya plan is lunch on Friday"]
+
+
+@pytest.mark.anyio
+async def test_deleted_memories_can_be_restored(env):
+    async with client(env, "claude") as c:
+        saved = await call(c, "add_memory", content="zyb relocated the studio downtown")
+        await call(c, "update_memory", id=saved["id"], pinned=True)
+        await call(c, "delete_memory", id=saved["id"])
+        recent = await history(c)
+        deleted = next(v for v in recent if v["memory_id"] == saved["id"])
+        restored = await call(c, "restore_memory", version_id=deleted["version_id"])
+        found = await call(c, "search_memories", query="relocating")
+        again = await call(c, "restore_memory", version_id=deleted["version_id"])
+    assert deleted["kind"] == "delete" and deleted["memory_exists"] is False
+    assert deleted["changed_by"].startswith("claude-")
+    assert restored == {"restored": True, "id": saved["id"]}
+    assert not by_id(found, saved["id"])["pinned"]
+    assert again == {"restored": True, "id": saved["id"]}
+
+
+@pytest.mark.anyio
+async def test_forever_deletes_erase_history(env):
+    async with client(env, "claude") as c:
+        saved = await call(c, "add_memory", content="zyc password hint was saved by mistake")
+        await call(c, "update_memory", id=saved["id"], content="zyc cleaned note")
+        old = (await history(c, memory_id=saved["id"]))[0]["version_id"]
+        assert (await call(c, "delete_memory", id=saved["id"], forever=True))["deleted"] is True
+        remaining = await history(c, memory_id=saved["id"])
+        restored = await call(c, "restore_memory", version_id=old)
+        assert (await c.call_tool("delete_memory", {"id": saved["id"], "forever": "yes"})).is_error
+    assert remaining == []
+    assert restored == {"restored": False}
+
+
+@pytest.mark.anyio
+async def test_history_stays_in_its_space(env):
+    async with client(env, "claude") as work, client(env, "personal") as home:
+        saved = await call(work, "add_memory", content="zyd private draft")
+        await call(work, "update_memory", id=saved["id"], content="zyd private final")
+        version = (await history(work, memory_id=saved["id"]))[0]["version_id"]
+        seen = await history(home, memory_id=saved["id"])
+        restored = await call(home, "restore_memory", version_id=version)
+        current = await call(work, "search_memories", query="zyd")
+    assert seen == [] and restored == {"restored": False}
+    assert by_id(current, saved["id"])["content"] == "zyd private final"
+
+
+@pytest.mark.anyio
+async def test_history_older_than_30_days_is_removed(env):
+    d1(
+        env["persist"],
+        "INSERT INTO memory_versions (memory_id, space, content, source, created_at, pinned, written_by, kind,"
+        " replaced_at) VALUES (2000000000, 'work', 'zye ancient', 's', '2020-01-01', 0, 's', 'delete',"
+        " '2020-01-01T00:00:00.000Z')",
+    )
+    async with client(env, "claude") as c:
+        versions = await history(c, memory_id=2000000000)
+    assert versions == []
 
 
 def by_id(found, memory_id):

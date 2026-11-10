@@ -1,7 +1,7 @@
 # memem
 
 One small memory server you can attach to Claude, ChatGPT and Gemini.
-It speaks MCP and exposes nine tools: `get_memory_overview`, `search_memories`, `list_memories`, `add_memory`, `update_memory`, `delete_memory`,
+It speaks MCP and exposes eleven tools: `get_memory_overview`, `search_memories`, `list_memories`, `list_memory_history`, `add_memory`, `update_memory`, `delete_memory`, `restore_memory`,
 `get_upload_link`, `get_sandbox_upload_url` and `get_sandbox_download_url`.
 
 It runs as a Cloudflare Worker in Python, with a D1 database and R2 for attached files. Needs [uv](https://docs.astral.sh/uv/),
@@ -52,7 +52,7 @@ The app opens an approval page, where you pick a memory space, optionally choose
 | Gemini | Settings > Connected Apps > Custom apps > Add a custom app, then paste the address | Google's help page describes no per-chat switch, so consider a read-only connection or its own space. Type `@` to direct a prompt to it |
 
 Plan limits apply and change over time. ChatGPT may limit write tools on some plans, in which case only the read tools
-(`get_memory_overview`, `search_memories` and `list_memories`) may work there. Google limits custom apps in the Gemini app to personal accounts in
+(`get_memory_overview`, `search_memories`, `list_memories` and `list_memory_history`) may work there. Google limits custom apps in the Gemini app to personal accounts in
 the US with Keep Activity on. Other developers have reported Gemini's sign-in failing on Google's side.
 
 ## Saving and retrieving files
@@ -79,7 +79,7 @@ settings.
 
 - A chat without the connector turned on has no access at all.
 - A connection reaches exactly one space, chosen on the approval page. Reconnect to change it.
-- Read-only connections get `get_memory_overview`, `search_memories` and `list_memories` only.
+- Read-only connections get `get_memory_overview`, `search_memories`, `list_memories` and `list_memory_history` only.
 
 ```bash
 uv run memem list
@@ -145,7 +145,7 @@ Files             attached to memories, stored whole
 - [x] Browse a whole space, page by page
 - [x] Tool descriptions state the purpose of memory rather than strict rules
 - [x] Refuse exact duplicates and show similar memories when saving
-- [ ] Keep edit history, so changes can be undone
+- [x] Keep edits and deletions for 30 days, so changes can be undone, with a `forever` option to erase them
 - [ ] Track deletions, so forgotten facts can't be recreated
 - [ ] Refuse edits that would overwrite a newer change
 - [ ] Repair command to index memories whose vectors failed to save
