@@ -794,6 +794,18 @@ async def test_search_syntax_in_queries_is_treated_as_words(env):
     assert saved["id"] in [m["id"] for m in found["memories"]]
 
 
+@pytest.mark.anyio
+async def test_empty_searches_suggest_trying_other_words(env):
+    async with client(env, "claude") as c:
+        saved = await call(c, "add_memory", content="zxh garden shed plans")
+        empty = await call(c, "search_memories", query="zxhnothinglikethis")
+        found = await call(c, "search_memories", query="zxh")
+        tools = {tool.name: tool.description for tool in (await c.list_tools()).tools}
+    assert empty["memories"] == [] and "different words" in empty["search_tip"]
+    assert saved["id"] in [m["id"] for m in found["memories"]] and "search_tip" not in found
+    assert "search again" in tools["search_memories"]
+
+
 def by_id(found, memory_id):
     return next(m for m in found["memories"] if m["id"] == memory_id)
 
