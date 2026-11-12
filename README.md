@@ -177,10 +177,6 @@ Files are attachments on memories. See [the design](docs/file-sharing-design.md)
 - [ ] `get_workflow_guide` tool for other multi-step workflows
 - [ ] Optional `SKILL.md` that people can install in each app
 
-### Maybe later
-
-- [ ] Wiki pages that summarize many memories, if questions spanning many memories become common
-
 ### Access and security
 
 - [x] Separate memory spaces, one per connection
