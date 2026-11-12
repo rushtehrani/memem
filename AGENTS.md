@@ -40,11 +40,11 @@ services. If you change how they are called, say so in your PR and check against
 
 ## Design
 
-memem is a memory service, layered as the README roadmap shows: Files, then Memories, then wiki pages, then the pinned
-overview. Keep these properties as layers are added:
+memem is a memory service, organized as the README shows: Files, then Memories, then the pinned overview, with
+dreaming through `review_memories` to tidy a space. Keep these properties as features are added:
 
 - Attached files are stored whole and never rewritten. Memories are derived notes and can be corrected.
-- The space is the access boundary for every layer.
+- The space is the access boundary for everything, from files to history.
 - Keep the pinned overview small. It is limited by `MAX_PINNED_CHARS`, because every chat reads it.
 - Tool descriptions state what memory is for, and only hold firm rules for consent, secrets and untrusted content.
 - Tools use verb-first names that say what they act on, like `search_memories`. Avoid bare names like `search`.
