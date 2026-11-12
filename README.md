@@ -125,7 +125,6 @@ ones below it, and dreaming tidies them in the background.
 
 ```text
 Pinned overview   small, read at the start of a chat
-Wiki pages        linked summaries across many memories (later)
 Memories          notes that can be searched, browsed and revised
 Files             attached to memories, stored whole
 ```
@@ -172,10 +171,6 @@ Files are attachments on memories. See [the design](docs/file-sharing-design.md)
 
 - [ ] `get_workflow_guide` tool for multi-step workflows, such as tidying a space
 - [ ] Optional `SKILL.md` that people can install in each app
-
-### Wiki pages
-
-- [ ] Linked summary pages, if questions spanning many documents become common
 
 ### Access and security
 

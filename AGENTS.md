@@ -40,8 +40,8 @@ services. If you change how they are called, say so in your PR and check against
 
 ## Design
 
-memem is a memory service, layered as the README roadmap shows: Files, then Memories, then wiki pages, then the pinned
-overview. Keep these properties as layers are added:
+memem is a memory service, layered as the README roadmap shows: Files, then Memories, then the pinned overview. Keep
+these properties as layers are added:
 
 - Attached files are stored whole and never rewritten. Memories are derived notes and can be corrected.
 - The space is the access boundary for every layer.
