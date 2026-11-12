@@ -112,22 +112,27 @@ Known limits of this first version:
   as data, but that only lowers the risk. Use `--read-only` for chats that process untrusted content.
 - **The model provider sees what it recalls.** Don't store secrets, and keep sensitive spaces away from
   providers you don't want reading them.
-
 - **Search works best in English.** `search_memories` combines keywords with meaning search from Workers AI and Vectorize.
   New memories can take a little while to become searchable by meaning, but keywords find them right away. If
   saving a vector fails, that memory is only findable by keyword.
 
-## Roadmap
+## How memory is organized
 
-memem is a memory service, designed as layers and informed by Anthropic's
-[components of agent memory](https://www.anthropic.com/research/components-of-agent-memory). Each layer is built from the
-ones below it, and dreaming tidies them in the background.
+memem is a memory service informed by Anthropic's
+[components of agent memory](https://www.anthropic.com/research/components-of-agent-memory). Everything lives in one
+space per connection.
 
 ```text
-Pinned overview   small, read at the start of a chat
-Memories          notes that can be searched, browsed and revised
-Files             attached to memories, stored whole
+Pinned overview   pinned memories, read at the start of every chat, kept small
+Memories          short notes, found by keyword and meaning, with 30 days of history
+Files             attached to memories, stored whole and never rewritten
 ```
+
+Dreaming is how a space stays tidy. For now it runs when you ask: `review_memories` finds likely duplicates,
+contradictions and dated wording, and the assistant proposes changes for you to approve. Edits and deletions can be
+undone for 30 days.
+
+## Roadmap
 
 ### Pinned overview
 
@@ -169,7 +174,7 @@ Files are attachments on memories. See [the design](docs/file-sharing-design.md)
 
 ### Guides and skills
 
-- [ ] `get_workflow_guide` tool for multi-step workflows, such as tidying a space
+- [ ] `get_workflow_guide` tool for other multi-step workflows
 - [ ] Optional `SKILL.md` that people can install in each app
 
 ### Access and security
